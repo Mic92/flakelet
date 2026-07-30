@@ -1,18 +1,24 @@
-use crate::config::{Config, ServiceConfig};
+use crate::config::{Config, ServiceConfig, SCHEMA_VERSION};
+use crate::driver::DriverEntry;
 use crate::error::{Error, Result};
 use crate::generations::{Generations, Manifest};
 use crate::state::{write_json_atomic, Hold, Origin, State};
-use crate::{lock, nix, portablectl, settings};
+use crate::systemd::Units;
+use crate::{driver, lock, nix, settings, systemd};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UpdateOpts {
     pub force: bool,
     pub no_wait: bool,
-    /// Tolerate network failures by keeping the current attachment (used at boot).
+    /// Tolerate network failures by keeping the current units (used at boot).
     pub offline_fallback: bool,
 }
 
@@ -31,7 +37,7 @@ pub struct ServiceStatus {
     pub flake: String,
     pub origin: Origin,
     pub generation: Option<u32>,
-    pub images: Vec<PathBuf>,
+    pub units: Units,
     pub locked_url: Option<String>,
     pub pin: Option<String>,
     pub degraded: bool,
@@ -42,18 +48,15 @@ pub struct ServiceStatus {
 
 pub struct Manager {
     pub config: Config,
-}
-
-struct PreparedSettings {
-    store_path: String,
-    hash: String,
-    soft_refs: Vec<String>,
-    nar_hashes: BTreeMap<String, String>,
+    system: String,
 }
 
 impl Manager {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            system: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        }
     }
 
     pub fn load(config_path: &Path) -> Result<Self> {
@@ -96,7 +99,7 @@ impl Manager {
             if all.contains_key(&name) || !path.exists() {
                 continue;
             }
-            let data = std::fs::read_to_string(&path)
+            let data = fs::read_to_string(&path)
                 .map_err(Error::io(format!("cannot read {}", path.display())))?;
             let svc = serde_json::from_str(&data)
                 .map_err(Error::json(format!("corrupt {}", path.display())))?;
@@ -114,7 +117,7 @@ impl Manager {
     fn state_dirs(&self) -> Result<Vec<String>> {
         let io = || Error::io(format!("read {}", self.config.state_dir.display()));
         let mut names = Vec::new();
-        match std::fs::read_dir(&self.config.state_dir) {
+        match fs::read_dir(&self.config.state_dir) {
             Ok(entries) => {
                 for entry in entries {
                     let entry = entry.map_err(io())?;
@@ -123,7 +126,7 @@ impl Manager {
                     }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(io()(e)),
         }
         names.sort();
@@ -142,7 +145,7 @@ impl Manager {
                     flake: svc.flake,
                     origin,
                     generation: st.generation,
-                    images: st.images,
+                    units: st.units,
                     locked_url: st.locked_url,
                     pin: st.pin,
                     degraded: st.degraded,
@@ -162,9 +165,7 @@ impl Manager {
         opts: UpdateOpts,
     ) -> Result<UpdateOutcome> {
         if self.config.services.contains_key(name) {
-            return Err(Error::Deploy(format!(
-                "'{name}' is declared in the host configuration; not overriding it manually"
-            )));
+            return Err(Error::DeclaredService(name.into()));
         }
         {
             let _locks = self.locks(name, !opts.no_wait, "deploy")?;
@@ -173,15 +174,13 @@ impl Manager {
         self.update(name, opts)
     }
 
-    /// Detach a service and delete its generations and state.
+    /// Stop a service and delete its generations and state.
     pub fn remove(&self, name: &str) -> Result<()> {
         let _locks = self.locks(name, true, "remove")?;
         let st = State::load(&self.state_path(name))?;
-        for image in &st.images {
-            portablectl::detach(image)?;
-        }
+        systemd::remove(&st.units)?;
         Generations::new(&self.config.gcroot_dir, name).remove_all()?;
-        std::fs::remove_dir_all(self.service_dir(name))
+        fs::remove_dir_all(self.service_dir(name))
             .map_err(Error::io(format!("remove state of {name}")))?;
         Ok(())
     }
@@ -202,11 +201,24 @@ impl Manager {
         Ok(removed)
     }
 
+    /// Re-link the units of all deployed services at boot, without evaluation.
+    pub fn boot(&self) -> Result<Vec<String>> {
+        let mut linked = Vec::new();
+        for name in self.state_dirs()? {
+            let st = State::load(&self.state_path(&name))?;
+            if !st.units.is_empty() {
+                systemd::relink(&st.units)?;
+                linked.push(name);
+            }
+        }
+        Ok(linked)
+    }
+
     pub fn lock_service(&self, name: &str) -> Result<String> {
         let (svc, _) = self.service(name)?;
         let _locks = self.locks(name, true, "lock")?;
         let mut st = State::load(&self.state_path(name))?;
-        let locked = nix::Nix::new(&self.config).locked_url(&svc.flake)?;
+        let locked = self.nix(&svc).locked_url(&svc.flake)?;
         st.pin = Some(locked.url.clone());
         st.save(&self.state_path(name))?;
         Ok(locked.url)
@@ -231,22 +243,22 @@ impl Manager {
     }
 
     pub fn rollback(&self, name: &str) -> Result<u32> {
-        let (svc, _) = self.service(name)?;
+        self.service(name)?;
         let _locks = self.locks(name, true, "rollback")?;
         let mut st = State::load(&self.state_path(name))?;
         let gens = Generations::new(&self.config.gcroot_dir, name);
         let current = st
             .generation
-            .ok_or_else(|| Error::Deploy(format!("'{name}' was never deployed")))?;
+            .ok_or_else(|| Error::NeverDeployed(name.into()))?;
         let target = *gens
             .list()?
             .iter()
             .rfind(|&&g| g < current)
-            .ok_or_else(|| Error::Deploy("no older generation to roll back to".into()))?;
+            .ok_or_else(|| Error::NoOlderGeneration(name.into()))?;
         let manifest = gens.manifest(target)?;
-        self.switch_attachment(&svc, &st.images, &manifest.images)?;
+        systemd::switch(&st.units, &manifest.units)?;
         st.generation = Some(target);
-        st.images = manifest.images;
+        st.units = manifest.units;
         st.save(&self.state_path(name))?;
         Ok(target)
     }
@@ -277,6 +289,10 @@ impl Manager {
         }
     }
 
+    fn nix(&self, svc: &ServiceConfig) -> nix::Nix {
+        nix::Nix::new(&self.config, svc.credentials.as_ref())
+    }
+
     fn try_update(
         &self,
         name: &str,
@@ -284,15 +300,28 @@ impl Manager {
         st: &mut State,
         opts: UpdateOpts,
     ) -> Result<UpdateOutcome> {
-        let nix = nix::Nix::new(&self.config);
+        if !svc.input_overrides.is_empty() {
+            return Err(Error::InputOverridesUnsupported(name.into()));
+        }
+        let nix = self.nix(svc);
 
-        let prepared = self.prepare_settings(&nix, name, svc)?;
+        // Settings referencing store paths must exist; they are gc-rooted per generation.
+        let soft_refs: Vec<String> = settings::store_paths(&svc.settings).into_iter().collect();
+        for path in &soft_refs {
+            if !Path::new(path).exists() {
+                return Err(Error::DanglingStorePath {
+                    service: name.into(),
+                    path: path.clone(),
+                });
+            }
+        }
 
         // Flake ref: pinned URL wins.
         let flake_ref = st.pin.clone().unwrap_or_else(|| svc.flake.clone());
         let locked = nix.locked_url(&flake_ref)?;
+        let settings_hash = hash_settings(svc);
 
-        if !opts.force && st.held_for(&prepared.hash, &locked.rev) {
+        if !opts.force && st.held_for(&settings_hash, &locked.rev) {
             return Ok(UpdateOutcome::Held {
                 reason: st
                     .hold
@@ -302,63 +331,72 @@ impl Manager {
             });
         }
 
-        // Evaluate and build all images.
-        let expr = nix::select_expr(&prepared.store_path, &prepared.hash, &prepared.nar_hashes);
-        let jobs = nix.eval(svc, &locked.url, &expr)?;
-        let build_root = self.service_dir(name).join("build");
-        std::fs::create_dir_all(&build_root).map_err(Error::io("create build dir"))?;
-        let mut images = Vec::new();
-        for (i, job) in jobs.iter().enumerate() {
-            let drv = job
-                .drv_path
-                .as_deref()
-                .ok_or_else(|| Error::Deploy(format!("missing drvPath for {}", job.attr)))?;
-            let out = nix.build(drv, &build_root.join(format!("out-{i}")))?;
-            images.extend(raw_images(&out)?);
-        }
-        if images.is_empty() {
-            return Err(Error::Deploy("built outputs contain no *.raw image".into()));
-        }
-        images.sort();
+        // Render, store and evaluate the driver expression.
+        let expr = driver::render(
+            &self.config,
+            &self.system,
+            &[DriverEntry {
+                name,
+                locked_url: &locked.url,
+                output: &svc.output,
+                settings: &svc.settings,
+            }],
+        );
+        let driver_file = self.service_dir(name).join("driver.nix");
+        fs::create_dir_all(self.service_dir(name)).map_err(Error::io("create service dir"))?;
+        fs::write(&driver_file, &expr).map_err(Error::io("write driver.nix"))?;
+        let driver_store = nix.add_driver(&driver_file)?;
 
-        if images == st.images && !opts.force {
+        let jobs = nix.eval_driver(&driver_store)?;
+        let job = jobs
+            .iter()
+            .find(|j| j.attr == name)
+            .and_then(|j| j.drv_path.as_deref())
+            .ok_or_else(|| Error::NoDerivation(name.into()))?;
+        let out = nix.build(job, &self.service_dir(name).join("result"))?;
+        let (units, health_check) = read_result(name, &out)?;
+        self.check_unit_ownership(name, &units)?;
+
+        if units == st.units && !opts.force {
             st.degraded = false;
             st.last_error = None;
             return Ok(UpdateOutcome::UpToDate);
         }
 
-        // Commit generation (gc roots) before touching the attachment. Root the
+        // Commit the generation (gc roots) before touching any unit. Root the
         // flake source + inputs too, so re-evals work offline.
         let gens = Generations::new(&self.config.gcroot_dir, name);
-        let mut extra_roots = prepared.soft_refs;
-        extra_roots.push(prepared.store_path);
+        let mut extra_roots = soft_refs;
+        extra_roots.push(out.display().to_string());
         extra_roots.extend(nix.flake_source_paths(&locked.url)?);
         let manifest = Manifest {
-            images: images.clone(),
+            version: SCHEMA_VERSION,
+            units: units.clone(),
             flake_url: locked.url.clone(),
             flake_rev: locked.rev.clone(),
-            settings_hash: prepared.hash.clone(),
+            settings_hash: settings_hash.clone(),
+            driver: driver_store,
+            health_check: health_check.clone(),
             created: unix_time(),
         };
         let generation = gens.create(&manifest, &extra_roots)?;
 
-        let previous_images = st.images.clone();
-        let result = self
-            .switch_attachment(svc, &previous_images, &images)
-            .and_then(|()| self.health_check(svc, &images));
+        let previous_units = st.units.clone();
+        let result = systemd::switch(&previous_units, &units)
+            .and_then(|()| health_check_run(name, &units, health_check.as_deref()));
 
         if let Err(err) = result {
             let reason = err.to_string();
-            // Restore the previous attachment; its settings are baked into those images.
-            if !previous_images.is_empty() {
-                self.switch_attachment(svc, &images, &previous_images)
-                    .map_err(|e| {
-                        Error::Deploy(format!("rollback after failed deploy also failed: {e}"))
-                    })?;
+            // Restore the previous units; their settings are baked into their store paths.
+            if !previous_units.is_empty() {
+                systemd::switch(&units, &previous_units).map_err(|e| Error::RollbackFailed {
+                    service: name.into(),
+                    source: Box::new(e),
+                })?;
             }
             st.hold = Some(Hold {
                 reason: reason.clone(),
-                settings_hash: prepared.hash,
+                settings_hash,
                 flake_rev: locked.rev,
             });
             st.last_error = Some(reason.clone());
@@ -366,7 +404,7 @@ impl Manager {
         }
 
         st.generation = Some(generation);
-        st.images = images;
+        st.units = units;
         st.locked_url = Some(locked.url);
         st.hold = None;
         st.degraded = false;
@@ -375,128 +413,77 @@ impl Manager {
         Ok(UpdateOutcome::Updated { generation })
     }
 
-    fn prepare_settings(
-        &self,
-        nix: &nix::Nix,
-        name: &str,
-        svc: &ServiceConfig,
-    ) -> Result<PreparedSettings> {
-        let path = match &svc.settings_file {
-            Some(p) => p.clone(),
-            None => {
-                // No settings configured: use an empty object.
-                let empty = self.service_dir(name).join("empty-settings.json");
-                write_json_atomic(&empty, &serde_json::json!({}))?;
-                empty
+    /// Refuse unit names that are already owned by another flakelet-managed service.
+    fn check_unit_ownership(&self, name: &str, units: &Units) -> Result<()> {
+        for other in self.state_dirs()? {
+            if other == name {
+                continue;
             }
-        };
-        let resolved = std::fs::canonicalize(&path)
-            .map_err(Error::io(format!("settings file {}", path.display())))?;
-        let store_path = if resolved.starts_with("/nix/store") {
-            resolved.display().to_string()
-        } else {
-            nix.add_to_store(&resolved)?
-        };
-        let hash = nix.sha256_of_file(&resolved)?;
-
-        let data = std::fs::read_to_string(&resolved)
-            .map_err(Error::io(format!("read {}", resolved.display())))?;
-        let value: serde_json::Value = serde_json::from_str(&data).map_err(Error::json(
-            format!("settings {} is not valid JSON", resolved.display()),
-        ))?;
-        let mut nar_hashes = BTreeMap::new();
-        let mut soft_refs = Vec::new();
-        for p in settings::store_paths(&value) {
-            if !Path::new(&p).exists() {
-                return Err(Error::DanglingStorePath(p));
-            }
-            nar_hashes.insert(p.clone(), nix.nar_hash(&p)?);
-            soft_refs.push(p);
-        }
-        Ok(PreparedSettings {
-            store_path,
-            hash,
-            soft_refs,
-            nar_hashes,
-        })
-    }
-
-    /// Attach `new` images, reattaching where an image of the same name is already
-    /// attached, and detach images from `old` that are no longer present.
-    fn switch_attachment(
-        &self,
-        svc: &ServiceConfig,
-        old: &[PathBuf],
-        new: &[PathBuf],
-    ) -> Result<()> {
-        let attached = portablectl::list()?;
-        for image in new {
-            let reattach = attached.contains(&portablectl::image_name(image));
-            portablectl::attach(image, &svc.profile, &svc.extra_portablectl_args, reattach)?;
-        }
-        let new_names: Vec<String> = new.iter().map(|p| portablectl::image_name(p)).collect();
-        for image in old {
-            if !new_names.contains(&portablectl::image_name(image)) {
-                portablectl::detach(image)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn health_check(&self, svc: &ServiceConfig, images: &[PathBuf]) -> Result<()> {
-        std::thread::sleep(std::time::Duration::from_secs(svc.health_check.timeout));
-        for image in images {
-            let name = portablectl::image_name(image);
-            let failed = Command::new("systemctl")
-                .args(["is-failed", "--quiet", &format!("{name}*")])
-                .status()
-                .map_err(|source| Error::Spawn {
-                    program: "systemctl".into(),
-                    source,
-                })?;
-            // `systemctl is-failed --quiet` exits 0 if any matching unit failed.
-            if failed.success() {
-                return Err(Error::Deploy(format!(
-                    "units of image '{name}' failed after attach"
-                )));
-            }
-        }
-        if let Some(cmd) = &svc.health_check.command {
-            let status = Command::new("/bin/sh")
-                .arg("-c")
-                .arg(cmd)
-                .status()
-                .map_err(|source| Error::Spawn {
-                    program: cmd.clone(),
-                    source,
-                })?;
-            if !status.success() {
-                return Err(Error::Deploy(format!("health check command failed: {cmd}")));
+            let st = State::load(&self.state_path(&other))?;
+            if let Some(unit) = units.keys().find(|u| st.units.contains_key(*u)) {
+                return Err(Error::UnitConflict {
+                    service: name.into(),
+                    unit: unit.clone(),
+                    owner: other,
+                });
             }
         }
         Ok(())
     }
 }
 
-/// All *.raw files inside a portableService output directory (or the path itself).
-fn raw_images(out: &Path) -> Result<Vec<PathBuf>> {
-    if out.extension().is_some_and(|e| e == "raw") {
-        return Ok(vec![out.to_path_buf()]);
+/// Read units/ and the optional health-check from a built driver output.
+fn read_result(name: &str, out: &Path) -> Result<(Units, Option<PathBuf>)> {
+    let units_dir = out.join("units");
+    let context = || format!("read {}", units_dir.display());
+    let mut units = Units::new();
+    for entry in fs::read_dir(&units_dir).map_err(Error::io(context()))? {
+        let entry = entry.map_err(Error::io(context()))?;
+        let target = fs::canonicalize(entry.path()).map_err(Error::io(context()))?;
+        units.insert(entry.file_name().to_string_lossy().into_owned(), target);
     }
-    let context = || format!("read {}", out.display());
-    let mut images = Vec::new();
-    for entry in std::fs::read_dir(out).map_err(Error::io(context()))? {
-        let path = entry.map_err(Error::io(context()))?.path();
-        if path.extension().is_some_and(|e| e == "raw") {
-            images.push(path);
-        }
+    if units.is_empty() {
+        return Err(Error::NoUnits(name.into()));
     }
-    Ok(images)
+    let health_check = out.join("health-check");
+    let health_check = health_check.exists().then(|| health_check.clone());
+    Ok((units, health_check))
+}
+
+fn health_check_run(name: &str, units: &Units, script: Option<&Path>) -> Result<()> {
+    if let Some(unit) = systemd::any_failed(units)? {
+        return Err(Error::UnitFailed {
+            service: name.into(),
+            unit,
+        });
+    }
+    let Some(script) = script else { return Ok(()) };
+    let status = Command::new(script)
+        .status()
+        .map_err(|source| Error::Spawn {
+            program: script.display().to_string(),
+            source,
+        })?;
+    if !status.success() {
+        return Err(Error::HealthCheckFailed {
+            service: name.into(),
+            script: script.into(),
+        });
+    }
+    Ok(())
+}
+
+/// Change-detection hash over the parts of the definition that affect the build.
+fn hash_settings(svc: &ServiceConfig) -> String {
+    let mut hasher = DefaultHasher::new();
+    svc.output.hash(&mut hasher);
+    svc.settings.to_string().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn unix_time() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -504,7 +491,6 @@ fn unix_time() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
     fn manager(dir: &Path) -> Manager {
         Manager::new(Config {
@@ -539,13 +525,8 @@ mod tests {
         }
         .save(&mgr.state_path("man"))
         .unwrap();
-        // Leftover state of a service that used to be declarative but has no images.
-        State {
-            origin: Origin::Declarative,
-            ..Default::default()
-        }
-        .save(&mgr.state_path("gone"))
-        .unwrap();
+        // Leftover state of a service that used to be declarative but has no units.
+        State::default().save(&mgr.state_path("gone")).unwrap();
 
         let services = mgr.services().unwrap();
         assert_eq!(services.len(), 2);
@@ -555,5 +536,21 @@ mod tests {
         assert_eq!(mgr.reconcile().unwrap(), vec!["gone".to_string()]);
         assert!(mgr.state_path("man").exists());
         assert!(!mgr.service_dir("gone").exists());
+    }
+
+    #[test]
+    fn foreign_unit_names_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager(tmp.path());
+        State {
+            units: Units::from([("web.service".into(), "/nix/store/x".into())]),
+            ..Default::default()
+        }
+        .save(&mgr.state_path("other"))
+        .unwrap();
+
+        let units = Units::from([("web.service".into(), "/nix/store/y".into())]);
+        assert!(mgr.check_unit_ownership("mine", &units).is_err());
+        assert!(mgr.check_unit_ownership("other", &units).is_ok());
     }
 }

@@ -15,14 +15,19 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # portablectl/systemctl/runuser come from the host systemd/util-linux.
+  # systemctl/runuser come from the host systemd/util-linux.
   postInstall = ''
     wrapProgram $out/bin/flakelet \
-      --prefix PATH : ${lib.makeBinPath [ nix nix-eval-jobs ]}
+      --prefix PATH : ${
+        lib.makeBinPath [
+          nix
+          nix-eval-jobs
+        ]
+      }
   '';
 
   meta = {
-    description = "Deploy systemd portable services from Nix flakes, evaluated at runtime";
+    description = "Runtime-managed systemd services from Nix flakes";
     license = lib.licenses.mit;
     mainProgram = "flakelet";
     platforms = lib.platforms.linux;

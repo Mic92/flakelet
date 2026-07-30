@@ -1,18 +1,21 @@
-use crate::config::{Config, ServiceConfig};
+use crate::config::{Config, Credentials, EvalSettings};
 use crate::error::{Error, Result};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Runs nix commands, optionally as an unprivileged user with a shared cache.
+/// Runs nix commands, optionally as an unprivileged user with a shared cache
+/// and fetch credentials for private flakes.
 pub struct Nix {
     eval_user: Option<String>,
     cache_dir: PathBuf,
+    eval: EvalSettings,
+    credentials: Credentials,
 }
 
 impl Nix {
-    pub fn new(cfg: &Config) -> Self {
+    pub fn new(cfg: &Config, credentials: Option<&Credentials>) -> Self {
         // Only drop privileges when we actually are root.
         let eval_user = if unsafe { libc::geteuid() } == 0 {
             cfg.eval_user.clone()
@@ -22,6 +25,11 @@ impl Nix {
         Self {
             eval_user,
             cache_dir: cfg.cache_dir.clone(),
+            eval: cfg.eval.clone(),
+            credentials: credentials
+                .or(cfg.credentials.as_ref())
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 
@@ -34,14 +42,12 @@ impl Nix {
             }
             None => Command::new(program),
         };
-        let out = cmd
-            .args(args)
-            .env("XDG_CACHE_HOME", &self.cache_dir)
-            .output()
-            .map_err(|source| Error::Spawn {
-                program: program.into(),
-                source,
-            })?;
+        cmd.args(args).env("XDG_CACHE_HOME", &self.cache_dir);
+        self.apply_credentials(&mut cmd)?;
+        let out = cmd.output().map_err(|source| Error::Spawn {
+            program: program.into(),
+            source,
+        })?;
         if !out.status.success() {
             return Err(Error::Command {
                 program: program.into(),
@@ -52,18 +58,53 @@ impl Nix {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
-    pub fn sha256_of_file(&self, path: &Path) -> Result<String> {
-        self.run(
+    fn apply_credentials(&self, cmd: &mut Command) -> Result<()> {
+        let creds = &self.credentials;
+        let mut nix_config = String::new();
+        if let Some(netrc) = &creds.netrc_file {
+            nix_config.push_str(&format!("netrc-file = {}\n", netrc.display()));
+        }
+        if let Some(tokens) = &creds.access_tokens_file {
+            // Tokens go through the environment, never onto the command line.
+            let data = fs::read_to_string(tokens)
+                .map_err(Error::io(format!("read {}", tokens.display())))?;
+            let tokens = data.split_whitespace().collect::<Vec<_>>().join(" ");
+            nix_config.push_str(&format!("access-tokens = {tokens}\n"));
+        }
+        if !nix_config.is_empty() {
+            cmd.env("NIX_CONFIG", nix_config);
+        }
+        if let Some(key) = &creds.ssh_key_file {
+            let mut ssh = format!(
+                "ssh -i {} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes",
+                key.display()
+            );
+            if let Some(known_hosts) = &creds.ssh_known_hosts_file {
+                ssh.push_str(&format!(" -o UserKnownHostsFile={}", known_hosts.display()));
+            }
+            cmd.env("GIT_SSH_COMMAND", ssh);
+        }
+        Ok(())
+    }
+
+    /// Locked flake URL including narHash, suitable for a pure builtins.getFlake.
+    pub fn locked_url(&self, flake: &str) -> Result<LockedFlake> {
+        let out = self.run(
             "nix",
-            &args(&["hash", "file", "--sri", &path.display().to_string()]),
-        )
+            &args(&["flake", "metadata", "--refresh", "--json", flake]),
+        )?;
+        let meta: FlakeMetadata =
+            serde_json::from_str(&out).map_err(Error::json("parse flake metadata"))?;
+        let sep = if meta.url.contains('?') { '&' } else { '?' };
+        let nar_hash = meta.locked.nar_hash.replace('+', "%2B").replace('=', "%3D");
+        Ok(LockedFlake {
+            url: format!("{}{sep}narHash={nar_hash}", meta.url),
+            rev: meta.locked.rev.unwrap_or(meta.locked.nar_hash),
+        })
     }
 
-    pub fn nar_hash(&self, store_path: &str) -> Result<String> {
-        self.run("nix", &args(&["hash", "path", "--sri", store_path]))
-    }
-
-    pub fn add_to_store(&self, path: &Path) -> Result<String> {
+    /// Add a rendered driver expression to the store.
+    pub fn add_driver(&self, driver_file: &Path) -> Result<PathBuf> {
         self.run(
             "nix",
             &args(&[
@@ -72,38 +113,30 @@ impl Nix {
                 "--mode",
                 "flat",
                 "--name",
-                "flakelet-settings",
-                &path.display().to_string(),
+                "flakelet-driver.nix",
+                &driver_file.display().to_string(),
             ]),
         )
+        .map(PathBuf::from)
     }
 
-    /// Locked flake URL (follows the ref, so this needs network for remote flakes).
-    pub fn locked_url(&self, flake: &str) -> Result<LockedFlake> {
+    /// Evaluate a driver expression with nix-eval-jobs.
+    pub fn eval_driver(&self, driver: &Path) -> Result<Vec<EvalJob>> {
+        let workers = self.eval.workers.unwrap_or(1);
+        let max_memory = self
+            .eval
+            .max_memory_mb
+            .unwrap_or_else(default_max_memory_mb);
         let out = self.run(
-            "nix",
-            &args(&["flake", "metadata", "--refresh", "--json", flake]),
+            "nix-eval-jobs",
+            &args(&[
+                "--workers",
+                &workers.to_string(),
+                "--max-memory-size",
+                &max_memory.to_string(),
+                &driver.display().to_string(),
+            ]),
         )?;
-        let meta: FlakeMetadata =
-            serde_json::from_str(&out).map_err(Error::json("parse flake metadata"))?;
-        Ok(LockedFlake {
-            url: meta.url,
-            rev: meta.revision.unwrap_or_default(),
-        })
-    }
-
-    /// Evaluate the portable service function and return all image derivations.
-    pub fn eval(&self, svc: &ServiceConfig, flake: &str, select: &str) -> Result<Vec<EvalJob>> {
-        let mut a = vec![
-            "--flake".into(),
-            format!("{flake}#{}", svc.output),
-            "--select".into(),
-            select.into(),
-        ];
-        for (input, target) in &svc.input_overrides {
-            a.extend(["--override-input".into(), input.clone(), target.clone()]);
-        }
-        let out = self.run("nix-eval-jobs", &a)?;
         let mut jobs = Vec::new();
         for line in out.lines().filter(|l| !l.trim().is_empty()) {
             let job: EvalJob =
@@ -114,15 +147,7 @@ impl Nix {
                     message,
                 });
             }
-            if job.drv_path.is_some() {
-                jobs.push(job);
-            }
-        }
-        if jobs.is_empty() {
-            return Err(Error::Deploy(format!(
-                "flake output {flake}#{} produced no derivations",
-                svc.output
-            )));
+            jobs.push(job);
         }
         Ok(jobs)
     }
@@ -153,8 +178,22 @@ impl Nix {
         out.lines()
             .next()
             .map(PathBuf::from)
-            .ok_or_else(|| Error::Deploy(format!("nix build {drv_path} produced no output")))
+            .ok_or_else(|| Error::NoBuildOutput(drv_path.into()))
     }
+}
+
+/// Half of MemAvailable, capped at 4 GiB, so eval cannot starve the machine.
+fn default_max_memory_mb() -> u64 {
+    let available_kb = fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("MemAvailable:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .unwrap_or(4 * 1024 * 1024);
+    (available_kb / 2 / 1024).clamp(512, 4096)
 }
 
 /// `nix flake archive --json` output: nested { path, inputs: { <name>: ... } }.
@@ -194,43 +233,12 @@ pub struct EvalJob {
 #[derive(Deserialize)]
 struct FlakeMetadata {
     url: String,
-    revision: Option<String>,
+    locked: LockedNode,
 }
 
-/// Build the --select expression: apply the flake's function to the host settings.
-pub fn select_expr(
-    settings_store_path: &str,
-    settings_sha256: &str,
-    nar_hashes: &BTreeMap<String, String>,
-) -> String {
-    let hashes = nar_hashes
-        .iter()
-        .map(|(p, h)| format!(r#""{p}" = "{h}";"#))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        r#"f: {{ image = f rec {{
-  settingsFile = builtins.fetchurl {{ url = "file://{path}"; sha256 = "{sha}"; }};
-  settings = builtins.fromJSON (builtins.readFile settingsFile);
-  storePath = p: (builtins.fetchTree {{ type = "path"; path = p; narHash = ({{ {hashes} }}).${{p}}; }}).outPath;
-}}; }}"#,
-        path = settings_store_path,
-        sha = settings_sha256,
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn select_expr_embeds_settings_and_hashes() {
-        let mut hashes = BTreeMap::new();
-        hashes.insert("/nix/store/aaa-dep".to_string(), "sha256-xyz".to_string());
-        let expr = select_expr("/nix/store/bbb-settings", "sha256-abc", &hashes);
-        assert!(expr.contains(r#"url = "file:///nix/store/bbb-settings""#));
-        assert!(expr.contains(r#"sha256 = "sha256-abc""#));
-        assert!(expr.contains(r#""/nix/store/aaa-dep" = "sha256-xyz";"#));
-        assert!(expr.contains("storePath = p:"));
-    }
+#[derive(Deserialize)]
+struct LockedNode {
+    #[serde(rename = "narHash")]
+    nar_hash: String,
+    rev: Option<String>,
 }

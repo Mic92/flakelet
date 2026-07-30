@@ -1,139 +1,200 @@
-use clap::{Args, Parser, Subcommand};
 use flakelet_core::config::ServiceConfig;
+use flakelet_core::error::Error;
 use flakelet_core::{Manager, Result, UpdateOpts, UpdateOutcome};
-use std::path::PathBuf;
+use lexopt::prelude::*;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
-#[derive(Parser)]
-#[command(
-    name = "flakelet",
-    about = "Deploy systemd portable services from Nix flakes"
-)]
-struct Cli {
-    #[arg(long, default_value = "/etc/flakelet/config.json")]
-    config: PathBuf,
-    #[command(subcommand)]
-    command: Cmd,
-}
+const USAGE: &str = "\
+flakelet - deploy systemd services from Nix flakes, evaluated at runtime
 
-#[derive(Args, Clone, Copy, Default)]
-struct UpdateFlags {
-    /// Retry even if the service is held after a failed deploy.
-    #[arg(long)]
-    force: bool,
-    /// Fail instead of waiting when another flakelet operation holds the lock.
-    #[arg(long)]
-    no_wait: bool,
-    /// Keep the current attachment when evaluation fails due to network errors.
-    #[arg(long)]
-    offline_fallback: bool,
-}
+Usage: flakelet [--config <file>] <command> [options]
 
-impl From<UpdateFlags> for UpdateOpts {
-    fn from(f: UpdateFlags) -> Self {
-        Self {
-            force: f.force,
-            no_wait: f.no_wait,
-            offline_fallback: f.offline_fallback,
-        }
-    }
-}
+Commands:
+  update [<name>...] [--force] [--no-wait] [--offline-fallback]
+                        Evaluate, build and activate services (default: all)
+  boot                  Re-link the current generations at boot, without evaluation
+  deploy <name> --flake <ref> [--settings <file>] [--output <attr>] [update options]
+                        Register and deploy a service outside the host configuration
+  remove <name>         Stop a service and delete its state and generations
+  reconcile             Remove declarative services that vanished from the host configuration
+  status [--json]       Show service status
+  rollback <name>       Switch back to the previous generation
+  lock <name>           Pin a service to the currently resolved flake revision
+  unlock <name>         Remove the pin
+  gc [--keep <n>]       Prune old generations
 
-#[derive(Subcommand)]
+Options:
+  --config <file>       Config file (default: /etc/flakelet/config.json)
+  --force               Retry even if the service is held after a failed deploy
+  --no-wait             Fail instead of waiting for another flakelet operation
+  --offline-fallback    Keep the current units when evaluation fails due to network errors
+";
+
 enum Cmd {
-    /// Evaluate, build and (re)attach services (all configured ones if no name is given).
     Update {
         names: Vec<String>,
-        #[command(flatten)]
-        flags: UpdateFlags,
+        opts: UpdateOpts,
     },
-    /// Register and deploy a service that is not part of the host configuration.
+    Boot,
     Deploy {
         name: String,
-        #[arg(long)]
-        flake: String,
-        #[arg(long)]
-        settings: Option<PathBuf>,
-        #[arg(long)]
-        output: Option<String>,
-        #[arg(long, default_value = "default")]
-        profile: String,
-        #[command(flatten)]
-        flags: UpdateFlags,
+        svc: Box<ServiceConfig>,
+        opts: UpdateOpts,
     },
-    /// Detach a service and delete its state and generations.
-    Remove { name: String },
-    /// Remove declarative services that vanished from the host configuration.
+    Remove {
+        name: String,
+    },
     Reconcile,
-    /// Show service status.
     Status {
-        #[arg(long)]
         json: bool,
     },
-    /// Reattach the previous generation.
-    Rollback { name: String },
-    /// Pin a service to the currently resolved flake revision.
-    Lock { name: String },
-    /// Remove the pin.
-    Unlock { name: String },
-    /// Prune old generations.
+    Rollback {
+        name: String,
+    },
+    Lock {
+        name: String,
+    },
+    Unlock {
+        name: String,
+    },
     Gc {
-        #[arg(long)]
         keep: Option<u32>,
     },
 }
 
-fn main() -> std::process::ExitCode {
-    match run() {
-        Ok(ok) => {
-            if ok {
-                std::process::ExitCode::SUCCESS
-            } else {
-                std::process::ExitCode::FAILURE
-            }
+struct Cli {
+    config: PathBuf,
+    command: Cmd,
+}
+
+fn main() -> ExitCode {
+    let cli = match parse_args() {
+        Ok(Some(cli)) => cli,
+        Ok(None) => {
+            print!("{USAGE}");
+            return ExitCode::SUCCESS;
         }
         Err(err) => {
+            eprintln!("error: {err}\n\n{USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match run(&cli) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(err) => {
             eprintln!("error: {err}");
-            std::process::ExitCode::FAILURE
+            ExitCode::FAILURE
         }
     }
 }
 
-fn run() -> Result<bool> {
-    let cli = Cli::parse();
+/// Ok(None) means: help requested.
+fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
+    let mut parser = lexopt::Parser::from_env();
+    let mut config = PathBuf::from("/etc/flakelet/config.json");
+
+    // Global options until the first positional argument (the command).
+    let command = loop {
+        match parser.next()? {
+            Some(Long("config")) => config = parser.value()?.into(),
+            Some(Long("help")) | Some(Short('h')) => return Ok(None),
+            Some(Value(v)) => break v.string()?,
+            Some(arg) => return Err(arg.unexpected()),
+            None => return Err("missing command".into()),
+        }
+    };
+
+    let mut names = Vec::new();
+    let mut opts = UpdateOpts::default();
+    let mut flake = None;
+    let mut settings = None;
+    let mut output = None;
+    let mut json = false;
+    let mut keep = None;
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("force") => opts.force = true,
+            Long("no-wait") => opts.no_wait = true,
+            Long("offline-fallback") => opts.offline_fallback = true,
+            Long("flake") => flake = Some(parser.value()?.string()?),
+            Long("settings") => settings = Some(PathBuf::from(parser.value()?)),
+            Long("output") => output = Some(parser.value()?.string()?),
+            Long("json") => json = true,
+            Long("keep") => keep = Some(parser.value()?.parse()?),
+            Long("help") | Short('h') => return Ok(None),
+            Value(v) => names.push(v.string()?),
+            _ => return Err(arg.unexpected()),
+        }
+    }
+
+    let one_name = |names: &[String]| -> std::result::Result<String, lexopt::Error> {
+        match names {
+            [name] => Ok(name.clone()),
+            _ => Err("expected exactly one service name".into()),
+        }
+    };
+    let command = match command.as_str() {
+        "update" => Cmd::Update { names, opts },
+        "boot" => Cmd::Boot,
+        "deploy" => Cmd::Deploy {
+            name: one_name(&names)?,
+            svc: Box::new(ServiceConfig {
+                flake: flake.ok_or("deploy requires --flake")?,
+                settings: read_settings(settings.as_deref()).map_err(|e| e.to_string())?,
+                output: output.unwrap_or_else(|| ServiceConfig::default().output),
+                ..Default::default()
+            }),
+            opts,
+        },
+        "remove" => Cmd::Remove {
+            name: one_name(&names)?,
+        },
+        "reconcile" => Cmd::Reconcile,
+        "status" => Cmd::Status { json },
+        "rollback" => Cmd::Rollback {
+            name: one_name(&names)?,
+        },
+        "lock" => Cmd::Lock {
+            name: one_name(&names)?,
+        },
+        "unlock" => Cmd::Unlock {
+            name: one_name(&names)?,
+        },
+        "gc" => Cmd::Gc { keep },
+        other => return Err(format!("unknown command '{other}'").into()),
+    };
+    Ok(Some(Cli { config, command }))
+}
+
+fn run(cli: &Cli) -> Result<bool> {
     let mgr = Manager::load(&cli.config)?;
-    match cli.command {
-        Cmd::Update { names, flags } => {
+    match &cli.command {
+        Cmd::Update { names, opts } => {
             let names = if names.is_empty() {
                 for removed in mgr.reconcile()? {
                     println!("{removed}: removed (no longer configured)");
                 }
                 mgr.services()?.into_keys().collect()
             } else {
-                names
+                names.clone()
             };
-            return Ok(update_all(&mgr, &names, flags.into()));
+            return Ok(update_all(&mgr, &names, *opts));
         }
-        Cmd::Deploy {
-            name,
-            flake,
-            settings,
-            output,
-            profile,
-            flags,
-        } => {
-            let svc = ServiceConfig {
-                flake,
-                settings_file: settings,
-                output: output.unwrap_or_else(|| ServiceConfig::default().output),
-                profile,
-                ..Default::default()
-            };
-            let outcome = mgr.deploy(&name, &svc, flags.into())?;
+        Cmd::Boot => {
+            for name in mgr.boot()? {
+                println!("{name}: units re-linked");
+            }
+        }
+        Cmd::Deploy { name, svc, opts } => {
+            let outcome = mgr.deploy(name, svc, *opts)?;
             println!("{name}: {}", describe(&outcome));
             return Ok(!matches!(outcome, UpdateOutcome::RolledBack { .. }));
         }
         Cmd::Remove { name } => {
-            mgr.remove(&name)?;
+            mgr.remove(name)?;
             println!("{name}: removed");
         }
         Cmd::Reconcile => {
@@ -141,22 +202,31 @@ fn run() -> Result<bool> {
                 println!("{removed}: removed (no longer configured)");
             }
         }
-        Cmd::Status { json } => print_status(&mgr, json)?,
+        Cmd::Status { json } => print_status(&mgr, *json)?,
         Cmd::Rollback { name } => {
-            let generation = mgr.rollback(&name)?;
+            let generation = mgr.rollback(name)?;
             println!("{name}: rolled back to generation {generation}");
         }
         Cmd::Lock { name } => {
-            let url = mgr.lock_service(&name)?;
+            let url = mgr.lock_service(name)?;
             println!("{name}: pinned to {url}");
         }
         Cmd::Unlock { name } => {
-            mgr.unlock_service(&name)?;
+            mgr.unlock_service(name)?;
             println!("{name}: unpinned");
         }
-        Cmd::Gc { keep } => mgr.gc(keep)?,
+        Cmd::Gc { keep } => mgr.gc(*keep)?,
     }
     Ok(true)
+}
+
+fn read_settings(path: Option<&Path>) -> Result<serde_json::Value> {
+    let Some(path) = path else {
+        return Ok(serde_json::json!({}));
+    };
+    let data =
+        fs::read_to_string(path).map_err(Error::io(format!("read settings {}", path.display())))?;
+    serde_json::from_str(&data).map_err(Error::json(format!("parse settings {}", path.display())))
 }
 
 fn update_all(mgr: &Manager, names: &[String], opts: UpdateOpts) -> bool {

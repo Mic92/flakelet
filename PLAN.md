@@ -61,7 +61,10 @@ repo later.
   attachment) would produce the same image basename.
 - An output attr may be one flakelet module or an attrset of modules. Each
   `impl` returns `{ units = { "<name>-….service" = <derivation>; … };
-  exports ? …; }` — plain unit files referencing store paths directly. All
+  healthCheck ? <derivation>; exports ? …; }` — plain unit files referencing
+  store paths directly. `healthCheck` is an executable derivation shipped by
+  the service itself (it knows how to probe itself); built and gc-rooted with
+  the generation. All
   units of one entry form one generation (activated/rolled back atomically).
 - Unit names must start with the entry `name`; flakelet enforces this and
   refuses collisions with units of other services or foreign units.
@@ -164,7 +167,6 @@ secrets. Declarative services with inline settings:
       "output": "flakelets.default",
       "settings": { "port": 3000, "tlsCert": "/run/secrets/grafana-tls" },
       "input_overrides": { "nixpkgs": "github:NixOS/nixpkgs/nixos-25.05" },
-      "health_check": { "timeout": 30, "command": null },
       "keep_generations": 5,
       "credentials": null                  // optional per-service override of the global block
     }
@@ -261,9 +263,10 @@ never-deployed for read-only commands, refuse mutating commands without
    daemon-reload, restart changed units, enable/start new ones, then
    stop/disable and unlink units that disappeared. If activation fails,
    switch back to the previous generation's units.
-5. Health check: wait `health_check.timeout`; no unit of the service may be
-   in `failed` state (socket-/timer-activated services are allowed to be
-   inactive); optional command.
+5. Health check: no unit of the service may be in `failed` state
+   (socket-/timer-activated services are allowed to be inactive); if the
+   module returned a `healthCheck` derivation, run it — non-zero exit means
+   unhealthy (retry/timeout logic lives inside the check itself).
 6. On failure: switch back to the previous generation (its settings are baked
    in), set hold, exit non-zero.
 7. On success: write state, publish exports, prune old generations.
@@ -339,7 +342,19 @@ activate, settings change → restart, broken update → rollback + hold,
 gc retention, reconcile after rename, boot relink, port-collision refusal,
 degraded/offline path, manual deploy/remove.
 
-## NixOS module
+## Host modules (NixOS first, modular for other platforms)
+
+The module is split so nix-darwin and system-manager can be supported later
+(on darwin a systemd subset will be ported):
+
+- `modules/common.nix` — platform-agnostic: the `services.flakelets.*`
+  options and rendering of `/etc/flakelet/config.json`.
+- `modules/nixos.nix` — systemd wiring: eval user, dirs, `flakelet-boot`,
+  `flakelet-reconcile`, per-service oneshots/timers, `flakelet.target`.
+- later: `modules/darwin.nix`, `modules/system-manager.nix` reusing
+  common.nix and only replacing the unit wiring.
+
+### NixOS module
 
 ```nix
 services.flakelets.extraModules = [ ./mycorp-lib.nix ];
@@ -349,7 +364,6 @@ services.flakelets.services.<name> = {
   settings = { ... };
   inputOverrides = { };
   autoUpdate = { enable = false; interval = "daily"; };
-  healthCheck = { timeout = 30; command = null; };
   keepGenerations = 5;
 };
 services.flakelets.eval = { workers = 1; maxMemoryMb = null; };

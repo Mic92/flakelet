@@ -34,11 +34,44 @@ pub enum Error {
     LockHeld { path: PathBuf, holder: String },
     #[error("service '{0}' is not configured")]
     UnknownService(String),
-    #[error("settings reference dangling store path {0}")]
-    DanglingStorePath(String),
-    /// Deployment/consistency errors (no images, health check failure, rollback issues, ...).
-    #[error("{0}")]
-    Deploy(String),
+    #[error("service '{0}' was never deployed")]
+    NeverDeployed(String),
+    #[error("service '{0}' has no older generation to roll back to")]
+    NoOlderGeneration(String),
+    #[error("settings of '{service}' reference dangling store path {path}")]
+    DanglingStorePath { service: String, path: String },
+    #[error("{path} has schema version {found}, this flakelet only supports up to {supported}")]
+    SchemaTooNew {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
+    #[error("service '{0}' is declared in the host configuration; not overriding it manually")]
+    DeclaredService(String),
+    #[error("input_overrides of '{0}' are not implemented yet")]
+    InputOverridesUnsupported(String),
+    #[error("driver evaluation produced no derivation for '{0}'")]
+    NoDerivation(String),
+    #[error("nix build of {0} produced no output path")]
+    NoBuildOutput(String),
+    #[error("module of '{0}' produced no units")]
+    NoUnits(String),
+    #[error("unit '{unit}' of '{service}' is already managed by service '{owner}'")]
+    UnitConflict {
+        service: String,
+        unit: String,
+        owner: String,
+    },
+    #[error("unit '{unit}' of '{service}' failed after start")]
+    UnitFailed { service: String, unit: String },
+    #[error("health check {script} of '{service}' failed")]
+    HealthCheckFailed { service: String, script: PathBuf },
+    #[error("rollback of '{service}' after failed deploy also failed: {source}")]
+    RollbackFailed {
+        service: String,
+        #[source]
+        source: Box<Error>,
+    },
 }
 
 impl Error {

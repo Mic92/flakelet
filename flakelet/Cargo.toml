@@ -7,4 +7,4 @@ license.workspace = true
 [dependencies]
 flakelet-core = { path = "../flakelet-core" }
 serde_json.workspace = true
-clap = { version = "4", features = ["derive"] }
+lexopt.workspace = true

@@ -1,112 +1,95 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Rendered by the NixOS module to /etc/flakelet/config.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
-    #[serde(default)]
+    pub version: u32,
     pub eval_user: Option<String>,
-    #[serde(default = "d_cache_dir")]
     pub cache_dir: PathBuf,
-    #[serde(default = "d_state_dir")]
     pub state_dir: PathBuf,
-    #[serde(default = "d_gcroot_dir")]
     pub gcroot_dir: PathBuf,
-    #[serde(default)]
+    /// Store path of the host's nixpkgs source, imported once by the driver.
+    pub nixpkgs: Option<PathBuf>,
+    /// Store path of the adios library source, injected into service modules.
+    pub adios: Option<PathBuf>,
+    /// Extra host-provided helper modules passed to service functions.
+    pub extra_modules: Vec<PathBuf>,
+    pub eval: EvalSettings,
+    pub credentials: Option<Credentials>,
     pub services: BTreeMap<String, ServiceConfig>,
-}
-
-/// One portable service. Declarative services live in config.json,
-/// manually deployed ones in <state_dir>/<name>/service.json.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceConfig {
-    pub flake: String,
-    #[serde(default = "d_output")]
-    pub output: String,
-    #[serde(default)]
-    pub settings_file: Option<PathBuf>,
-    #[serde(default = "d_profile")]
-    pub profile: String,
-    #[serde(default)]
-    pub extra_portablectl_args: Vec<String>,
-    #[serde(default)]
-    pub input_overrides: BTreeMap<String, String>,
-    #[serde(default)]
-    pub health_check: HealthCheck,
-    #[serde(default = "d_keep")]
-    pub keep_generations: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthCheck {
-    /// Seconds to wait after attaching before checking unit state.
-    #[serde(default = "d_timeout")]
-    pub timeout: u64,
-    /// Non-zero exit means unhealthy.
-    #[serde(default)]
-    pub command: Option<String>,
-}
-
-impl Default for HealthCheck {
-    fn default() -> Self {
-        Self {
-            timeout: d_timeout(),
-            command: None,
-        }
-    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: SCHEMA_VERSION,
             eval_user: None,
-            cache_dir: d_cache_dir(),
-            state_dir: d_state_dir(),
-            gcroot_dir: d_gcroot_dir(),
+            cache_dir: "/var/cache/flakelet".into(),
+            state_dir: "/var/lib/flakelet".into(),
+            gcroot_dir: "/nix/var/nix/gcroots/flakelet".into(),
+            nixpkgs: None,
+            adios: None,
+            extra_modules: Vec::new(),
+            eval: EvalSettings::default(),
+            credentials: None,
             services: BTreeMap::new(),
         }
     }
 }
 
-fn d_cache_dir() -> PathBuf {
-    "/var/cache/flakelet".into()
+/// Resource limits for nix-eval-jobs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvalSettings {
+    /// Worker count (default 1: the batch shares one nixpkgs instance).
+    pub workers: Option<u32>,
+    /// Restart a worker above this many MiB. Default: derived from available RAM.
+    pub max_memory_mb: Option<u64>,
 }
-fn d_state_dir() -> PathBuf {
-    "/var/lib/flakelet".into()
+
+/// Fetch credentials for private flakes; file paths readable by the eval user.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Credentials {
+    pub netrc_file: Option<PathBuf>,
+    /// File with `host=token` lines, passed to nix via NIX_CONFIG access-tokens.
+    pub access_tokens_file: Option<PathBuf>,
+    pub ssh_key_file: Option<PathBuf>,
+    pub ssh_known_hosts_file: Option<PathBuf>,
 }
-fn d_gcroot_dir() -> PathBuf {
-    "/nix/var/nix/gcroots/flakelet".into()
-}
-fn d_profile() -> String {
-    "default".into()
-}
-fn d_keep() -> u32 {
-    5
-}
-fn d_timeout() -> u64 {
-    30
-}
-fn d_output() -> String {
-    format!(
-        "portableServices.{}-{}.default",
-        std::env::consts::ARCH,
-        std::env::consts::OS
-    )
+
+/// One service. Declarative services live in config.json,
+/// manually deployed ones in <state_dir>/<name>/service.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServiceConfig {
+    pub flake: String,
+    pub output: String,
+    /// Host settings, embedded into the driver expression as Nix values.
+    pub settings: serde_json::Value,
+    pub input_overrides: BTreeMap<String, String>,
+    pub keep_generations: u32,
+    /// Per-service override of the global credentials block.
+    pub credentials: Option<Credentials>,
 }
 
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             flake: String::new(),
-            output: d_output(),
-            settings_file: None,
-            profile: d_profile(),
-            extra_portablectl_args: Vec::new(),
+            output: "flakelets.default".into(),
+            settings: serde_json::Value::Object(Default::default()),
             input_overrides: BTreeMap::new(),
-            health_check: HealthCheck::default(),
-            keep_generations: d_keep(),
+            keep_generations: 5,
+            credentials: None,
         }
     }
 }
@@ -114,15 +97,25 @@ impl Default for ServiceConfig {
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         // A missing config file just means: no declarative services.
-        match std::fs::read_to_string(path) {
+        let cfg: Self = match fs::read_to_string(path) {
             Ok(data) => serde_json::from_str(&data)
-                .map_err(Error::json(format!("cannot parse {}", path.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(source) => Err(Error::Io {
-                context: format!("cannot read config {}", path.display()),
-                source,
-            }),
+                .map_err(Error::json(format!("cannot parse {}", path.display())))?,
+            Err(e) if e.kind() == ErrorKind::NotFound => Self::default(),
+            Err(source) => {
+                return Err(Error::Io {
+                    context: format!("cannot read config {}", path.display()),
+                    source,
+                })
+            }
+        };
+        if cfg.version > SCHEMA_VERSION {
+            return Err(Error::SchemaTooNew {
+                path: path.into(),
+                found: cfg.version,
+                supported: SCHEMA_VERSION,
+            });
         }
+        Ok(cfg)
     }
 }
 
@@ -134,27 +127,24 @@ mod tests {
     fn parse_config() {
         let json = r#"{
           "eval_user": "flakelet",
+          "nixpkgs": "/nix/store/aaa-source",
+          "adios": "/nix/store/bbb-adios",
+          "eval": { "workers": 2 },
+          "credentials": { "netrc_file": "/run/secrets/netrc" },
           "services": {
             "grafana": { "flake": "github:me/grafana-svc" },
             "svc": {
               "flake": "git+https://example.com/svc",
-              "settings_file": "/etc/flakelet/svc/settings.json",
-              "profile": "trusted",
+              "settings": { "port": 8080, "cert": "/nix/store/ccc-cert.pem" },
               "input_overrides": { "nixpkgs": "github:NixOS/nixpkgs/nixos-25.05" },
-              "health_check": { "timeout": 5, "command": "curl -fs http://localhost:3000" },
               "keep_generations": 2
             }
           }
         }"#;
         let cfg: Config = serde_json::from_str(json).unwrap();
-        let grafana = &cfg.services["grafana"];
-        assert!(grafana.output.starts_with("portableServices."));
-        assert_eq!(grafana.keep_generations, 5);
-        let svc = &cfg.services["svc"];
-        assert_eq!(svc.profile, "trusted");
-        assert_eq!(
-            svc.health_check.command.as_deref(),
-            Some("curl -fs http://localhost:3000")
-        );
+        assert_eq!(cfg.eval.workers, Some(2));
+        assert_eq!(cfg.services["grafana"].output, "flakelets.default");
+        assert_eq!(cfg.services["grafana"].keep_generations, 5);
+        assert_eq!(cfg.services["svc"].settings["port"], 8080);
     }
 }

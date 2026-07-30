@@ -1,0 +1,68 @@
+{
+  description = "Runtime-managed native systemd services from Nix flakes";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    adios = {
+      url = "github:adisbladis/adios";
+      flake = false;
+    };
+  };
+
+  outputs =
+    {
+      self,
+      nixpkgs,
+      adios,
+    }:
+    let
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = nixpkgs.lib.genAttrs systems;
+    in
+    {
+      packages = forAllSystems (system: rec {
+        flakelet = nixpkgs.legacyPackages.${system}.callPackage ./default.nix { };
+        default = flakelet;
+      });
+
+      nixosModules = {
+        flakelet =
+          { pkgs, lib, ... }:
+          {
+            imports = [
+              ./modules/common.nix
+              ./modules/nixos.nix
+            ];
+            services.flakelets = {
+              package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.flakelet;
+              adios = lib.mkDefault adios.outPath;
+            };
+          };
+        default = self.nixosModules.flakelet;
+      };
+
+      devShells = forAllSystems (system: {
+        default =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+          in
+          pkgs.mkShell {
+            packages = with pkgs; [
+              cargo
+              rustc
+              clippy
+              rustfmt
+              rust-analyzer
+              nix-eval-jobs
+            ];
+          };
+      });
+
+      checks = forAllSystems (system: {
+        package = self.packages.${system}.flakelet;
+      });
+    };
+}
