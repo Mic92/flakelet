@@ -22,6 +22,21 @@ let
       };
     }
   '';
+  # A prebuilt service artifact, as CI would produce it: no runtime evaluation.
+  prebuiltArtifact =
+    name:
+    pkgs.linkFarm "flakelet-${name}" {
+      "units/${name}.service" = pkgs.writeText "${name}.service" ''
+        [Unit]
+        Description=prebuilt flakelet service ${name}
+        [Service]
+        ExecStart=${pkgs.coreutils}/bin/sleep infinity
+        [Install]
+        WantedBy=multi-user.target
+      '';
+      "meta.json" = pkgs.writeText "meta.json" (builtins.toJSON { flake_url = "prebuilt:${name}"; });
+    };
+  cliArtifact = prebuiltArtifact "cli";
 in
 {
   name = "flakelet";
@@ -38,6 +53,7 @@ in
           flake = "path:${testService}";
           settings.greeting = "hello";
         };
+        services.static.prebuilt = prebuiltArtifact "static";
       };
 
       nix.settings = {
@@ -61,6 +77,7 @@ in
           pkgs.stdenvNoCC
           pkgs.bash
           pkgs.coreutils
+          cliArtifact
         ];
         memorySize = 4096;
         cores = 4;
@@ -81,9 +98,18 @@ in
     machine.succeed("test -f /nix/var/nix/gcroots/flakelet/web/gen-1/manifest.json")
     machine.succeed("flakelet status | grep -q '^web'")
 
-    # Reconcile does not touch a still-declared service.
+    # A prebuilt artifact is activated without any evaluation.
+    machine.succeed("systemctl start flakelet-static.service", timeout=120)
+    machine.succeed("systemctl is-active static.service")
+
+    # Imperative activation of a prebuilt artifact via the CLI.
+    machine.succeed("flakelet activate cli ${cliArtifact}")
+    machine.succeed("systemctl is-active cli.service")
+    machine.succeed("flakelet status --json | grep -q 'prebuilt:cli'")
+
+    # Reconcile keeps still-declared and imperative services.
     machine.succeed("flakelet reconcile")
-    machine.succeed("systemctl is-active web.service")
+    machine.succeed("systemctl is-active web.service static.service cli.service")
 
     # Boot relink restores a lost unit link.
     machine.succeed("rm /run/systemd/system/web.service")
