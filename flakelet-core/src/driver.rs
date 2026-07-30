@@ -7,14 +7,16 @@ pub struct DriverEntry<'a> {
     pub name: &'a str,
     /// Fully locked flake URL (rev + narHash) for a pure builtins.getFlake.
     pub locked_url: &'a str,
+    pub locked_rev: &'a str,
     /// Attribute path below the flake outputs, e.g. "flakelets.default".
     pub output: &'a str,
     pub settings: &'a Value,
+    pub settings_hash: &'a str,
 }
 
 /// Render the driver expression that is added to the store and evaluated with
-/// nix-eval-jobs. Each attribute builds a linkFarm: units/<unit files> plus an
-/// optional health-check script.
+/// nix-eval-jobs. Each attribute builds a self-describing artifact:
+/// meta.json, units/<unit files> and an optional health-check script.
 pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String {
     let nixpkgs = config
         .nixpkgs
@@ -43,6 +45,13 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
         } else {
             "inherit pkgs;"
         };
+        let meta = serde_json::json!({
+            "version": 1,
+            "name": e.name,
+            "flake_url": e.locked_url,
+            "flake_rev": e.locked_rev,
+            "settings_hash": e.settings_hash,
+        });
         let _ = writeln!(
             out,
             r#"  {attr} =
@@ -55,6 +64,7 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
       }};
     in
     pkgs.linkFarm "flakelet-{raw_name}" ({{
+      "meta.json" = pkgs.writeText "flakelet-{raw_name}-meta.json" {meta};
       units = pkgs.linkFarm "flakelet-{raw_name}-units" module.units;
     }} // (if module ? healthCheck then {{ health-check = module.healthCheck; }} else {{ }}));"#,
             attr = nix_string(e.name),
@@ -62,6 +72,7 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             output = e.output,
             name = nix_string(e.name),
             settings = json_to_nix(e.settings),
+            meta = nix_string(&meta.to_string()),
             raw_name = e.name,
         );
     }
@@ -127,8 +138,10 @@ mod tests {
             &[DriverEntry {
                 name: "grafana",
                 locked_url: "github:me/grafana-svc/abc?narHash=sha256-xyz",
+                locked_rev: "abc",
                 output: "flakelets.default",
                 settings: &settings,
+                settings_hash: "deadbeef",
             }],
         );
         assert!(
@@ -139,5 +152,6 @@ mod tests {
         );
         assert!(expr.contains(r#"settings = { "port" = 3000; };"#));
         assert!(expr.contains("inherit pkgs adios;"));
+        assert!(expr.contains(r#"\"settings_hash\":\"deadbeef\""#));
     }
 }

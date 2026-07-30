@@ -17,6 +17,8 @@ Commands:
   boot                  Re-link the current generations at boot, without evaluation
   deploy <name> --flake <ref> [--settings <file>] [--output <attr>] [update options]
                         Register and deploy a service outside the host configuration
+  activate <name> <store path>
+                        Register and start a prebuilt service artifact (no evaluation)
   remove <name>         Stop a service and delete its state and generations
   reconcile             Remove declarative services that vanished from the host configuration
   status [--json]       Show service status
@@ -30,6 +32,7 @@ Options:
   --force               Retry even if the service is held after a failed deploy
   --no-wait             Fail instead of waiting for another flakelet operation
   --offline-fallback    Keep the current units when evaluation fails due to network errors
+  --no-refresh          Do not bypass flake caches when resolving refs (offline use)
 ";
 
 enum Cmd {
@@ -119,6 +122,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("force") => opts.force = true,
             Long("no-wait") => opts.no_wait = true,
             Long("offline-fallback") => opts.offline_fallback = true,
+            Long("no-refresh") => opts.no_refresh = true,
             Long("flake") => flake = Some(parser.value()?.string()?),
             Long("settings") => settings = Some(PathBuf::from(parser.value()?)),
             Long("output") => output = Some(parser.value()?.string()?),
@@ -148,6 +152,17 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
                 ..Default::default()
             }),
             opts,
+        },
+        "activate" => match &names[..] {
+            [name, path] => Cmd::Deploy {
+                name: name.clone(),
+                svc: Box::new(ServiceConfig {
+                    prebuilt: Some(path.into()),
+                    ..Default::default()
+                }),
+                opts,
+            },
+            _ => return Err("activate expects <name> <store path>".into()),
         },
         "remove" => Cmd::Remove {
             name: one_name(&names)?,

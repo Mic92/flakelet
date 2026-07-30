@@ -21,9 +21,18 @@ let
   serviceModule = {
     options = {
       flake = lib.mkOption {
-        type = lib.types.str;
+        type = lib.types.nullOr lib.types.str;
+        default = null;
         example = "github:Mic92/my-service";
         description = "Flake reference, resolved at runtime on the machine.";
+      };
+      prebuilt = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = ''
+          Store path of an already built service artifact (settings baked in).
+          Mutually exclusive with `flake`; nothing is evaluated at runtime.
+        '';
       };
       output = lib.mkOption {
         type = lib.types.str;
@@ -135,11 +144,24 @@ in
         ssh_key_file = cfg.credentials.sshKeyFile;
         ssh_known_hosts_file = cfg.credentials.sshKnownHostsFile;
       };
-      services = lib.mapAttrs (_: svc: {
-        inherit (svc) flake output settings;
-        input_overrides = svc.inputOverrides;
-        keep_generations = svc.keepGenerations;
-      }) cfg.services;
+      services = lib.mapAttrs (
+        _: svc:
+        lib.filterAttrs (_: v: v != null) {
+          inherit (svc)
+            flake
+            output
+            settings
+            prebuilt
+            ;
+          input_overrides = svc.inputOverrides;
+          keep_generations = svc.keepGenerations;
+        }
+      ) cfg.services;
     };
+
+    assertions = lib.mapAttrsToList (name: svc: {
+      assertion = (svc.flake == null) != (svc.prebuilt == null);
+      message = "services.flakelets.services.${name}: set exactly one of `flake` or `prebuilt`";
+    }) cfg.services;
   };
 }

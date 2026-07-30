@@ -1,21 +1,13 @@
 use crate::error::{Error, Result};
+use rustix::fs::{flock, FlockOperation};
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::Write;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 
 /// A held flock; released on drop.
 #[derive(Debug)]
 pub struct Lock {
     _file: File,
-}
-
-fn flock(file: &File, op: libc::c_int) -> std::io::Result<()> {
-    if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
 }
 
 /// Acquire a lock. `exclusive`: LOCK_EX vs LOCK_SH. `wait`: block or fail immediately.
@@ -32,16 +24,14 @@ pub fn acquire(path: &Path, exclusive: bool, wait: bool, info: &str) -> Result<L
         .open(path)
         .map_err(Error::io(context()))?;
 
-    let mut op = if exclusive {
-        libc::LOCK_EX
-    } else {
-        libc::LOCK_SH
+    let op = match (exclusive, wait) {
+        (true, true) => FlockOperation::LockExclusive,
+        (true, false) => FlockOperation::NonBlockingLockExclusive,
+        (false, true) => FlockOperation::LockShared,
+        (false, false) => FlockOperation::NonBlockingLockShared,
     };
-    if !wait {
-        op |= libc::LOCK_NB;
-    }
-    if let Err(e) = flock(&file, op) {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
+    if let Err(errno) = flock(&file, op) {
+        if errno == rustix::io::Errno::WOULDBLOCK || errno == rustix::io::Errno::AGAIN {
             let holder = std::fs::read_to_string(path).unwrap_or_default();
             return Err(Error::LockHeld {
                 path: path.to_path_buf(),
@@ -50,7 +40,7 @@ pub fn acquire(path: &Path, exclusive: bool, wait: bool, info: &str) -> Result<L
         }
         return Err(Error::Io {
             context: context(),
-            source: e,
+            source: errno.into(),
         });
     }
     if exclusive {

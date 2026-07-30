@@ -15,7 +15,7 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # systemctl/runuser come from the host systemd/util-linux.
+  # systemctl comes from the host systemd.
   postInstall = ''
     wrapProgram $out/bin/flakelet \
       --prefix PATH : ${

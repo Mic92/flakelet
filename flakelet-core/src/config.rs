@@ -75,6 +75,9 @@ pub struct ServiceConfig {
     pub output: String,
     /// Host settings, embedded into the driver expression as Nix values.
     pub settings: serde_json::Value,
+    /// Store path of an already built driver output (units/, health-check).
+    /// Skips resolution, evaluation and build.
+    pub prebuilt: Option<PathBuf>,
     pub input_overrides: BTreeMap<String, String>,
     pub keep_generations: u32,
     /// Per-service override of the global credentials block.
@@ -87,6 +90,7 @@ impl Default for ServiceConfig {
             flake: String::new(),
             output: "flakelets.default".into(),
             settings: serde_json::Value::Object(Default::default()),
+            prebuilt: None,
             input_overrides: BTreeMap::new(),
             keep_generations: 5,
             credentials: None,

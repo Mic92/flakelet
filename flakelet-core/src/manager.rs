@@ -20,6 +20,8 @@ pub struct UpdateOpts {
     pub no_wait: bool,
     /// Tolerate network failures by keeping the current units (used at boot).
     pub offline_fallback: bool,
+    /// Skip `--refresh` when resolving flake refs (offline use, tests).
+    pub no_refresh: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -218,7 +220,7 @@ impl Manager {
         let (svc, _) = self.service(name)?;
         let _locks = self.locks(name, true, "lock")?;
         let mut st = State::load(&self.state_path(name))?;
-        let locked = self.nix(&svc).locked_url(&svc.flake)?;
+        let locked = self.nix(&svc).locked_url(&svc.flake, true)?;
         st.pin = Some(locked.url.clone());
         st.save(&self.state_path(name))?;
         Ok(locked.url)
@@ -316,30 +318,74 @@ impl Manager {
             }
         }
 
-        // Flake ref: pinned URL wins.
-        let flake_ref = st.pin.clone().unwrap_or_else(|| svc.flake.clone());
-        let locked = nix.locked_url(&flake_ref)?;
+        // Produce the service artifact: activate a prebuilt one as-is, or
+        // resolve + evaluate + build the declared flake.
         let settings_hash = hash_settings(svc);
+        let mut artifact = if let Some(prebuilt) = &svc.prebuilt {
+            eprintln!("{name}: using prebuilt artifact {}", prebuilt.display());
+            if !prebuilt.exists() {
+                return Err(Error::DanglingStorePath {
+                    service: name.into(),
+                    path: prebuilt.display().to_string(),
+                });
+            }
+            let meta = ArtifactMeta::load(prebuilt);
+            Artifact {
+                out: prebuilt.clone(),
+                driver: prebuilt.clone(),
+                flake_url: meta.flake_url,
+                flake_rev: meta.flake_rev,
+                settings_hash: meta.settings_hash,
+                ..Artifact::default()
+            }
+        } else {
+            // Flake ref: pinned URL wins.
+            let flake_ref = st.pin.clone().unwrap_or_else(|| svc.flake.clone());
+            eprintln!("{name}: resolving {flake_ref}");
+            let locked = nix.locked_url(&flake_ref, !opts.no_refresh)?;
 
-        if !opts.force && st.held_for(&settings_hash, &locked.rev) {
-            return Ok(UpdateOutcome::Held {
-                reason: st
-                    .hold
-                    .as_ref()
-                    .map(|h| h.reason.clone())
-                    .unwrap_or_default(),
-            });
+            if !opts.force && st.held_for(&settings_hash, &locked.rev) {
+                return Ok(UpdateOutcome::Held {
+                    reason: st
+                        .hold
+                        .as_ref()
+                        .map(|h| h.reason.clone())
+                        .unwrap_or_default(),
+                });
+            }
+            self.evaluate(name, svc, &nix, &locked, &settings_hash)?
+        };
+
+        (artifact.units, artifact.health_check) = read_result(name, &artifact.out)?;
+        self.check_unit_ownership(name, &artifact.units)?;
+
+        if artifact.units == st.units && !opts.force {
+            st.degraded = false;
+            st.last_error = None;
+            return Ok(UpdateOutcome::UpToDate);
         }
+        self.activate(name, svc, st, artifact, soft_refs)
+    }
 
-        // Render, store and evaluate the driver expression.
+    /// Render, store, evaluate and build the driver expression for one service.
+    fn evaluate(
+        &self,
+        name: &str,
+        svc: &ServiceConfig,
+        nix: &nix::Nix,
+        locked: &nix::LockedFlake,
+        settings_hash: &str,
+    ) -> Result<Artifact> {
         let expr = driver::render(
             &self.config,
             &self.system,
             &[DriverEntry {
                 name,
                 locked_url: &locked.url,
+                locked_rev: &locked.rev,
                 output: &svc.output,
                 settings: &svc.settings,
+                settings_hash,
             }],
         );
         let driver_file = self.service_dir(name).join("driver.nix");
@@ -347,40 +393,57 @@ impl Manager {
         fs::write(&driver_file, &expr).map_err(Error::io("write driver.nix"))?;
         let driver_store = nix.add_driver(&driver_file)?;
 
+        eprintln!("{name}: evaluating {}", driver_store.display());
         let jobs = nix.eval_driver(&driver_store)?;
         let job = jobs
             .iter()
             .find(|j| j.attr == name)
             .and_then(|j| j.drv_path.as_deref())
             .ok_or_else(|| Error::NoDerivation(name.into()))?;
+        eprintln!("{name}: building {job}");
         let out = nix.build(job, &self.service_dir(name).join("result"))?;
-        let (units, health_check) = read_result(name, &out)?;
-        self.check_unit_ownership(name, &units)?;
+        Ok(Artifact {
+            out,
+            driver: driver_store,
+            flake_url: locked.url.clone(),
+            flake_rev: locked.rev.clone(),
+            settings_hash: settings_hash.into(),
+            flake_roots: nix.flake_source_paths(&locked.url)?,
+            ..Artifact::default()
+        })
+    }
 
-        if units == st.units && !opts.force {
-            st.degraded = false;
-            st.last_error = None;
-            return Ok(UpdateOutcome::UpToDate);
-        }
-
+    /// Commit the artifact as a new generation and switch the units over,
+    /// rolling back to the previous generation if activation fails.
+    fn activate(
+        &self,
+        name: &str,
+        svc: &ServiceConfig,
+        st: &mut State,
+        artifact: Artifact,
+        soft_refs: Vec<String>,
+    ) -> Result<UpdateOutcome> {
+        let units = artifact.units.clone();
+        let health_check = artifact.health_check.clone();
         // Commit the generation (gc roots) before touching any unit. Root the
         // flake source + inputs too, so re-evals work offline.
         let gens = Generations::new(&self.config.gcroot_dir, name);
         let mut extra_roots = soft_refs;
-        extra_roots.push(out.display().to_string());
-        extra_roots.extend(nix.flake_source_paths(&locked.url)?);
+        extra_roots.push(artifact.out.display().to_string());
+        extra_roots.extend(artifact.flake_roots);
         let manifest = Manifest {
             version: SCHEMA_VERSION,
             units: units.clone(),
-            flake_url: locked.url.clone(),
-            flake_rev: locked.rev.clone(),
-            settings_hash: settings_hash.clone(),
-            driver: driver_store,
+            flake_url: artifact.flake_url.clone(),
+            flake_rev: artifact.flake_rev.clone(),
+            settings_hash: artifact.settings_hash.clone(),
+            driver: artifact.driver,
             health_check: health_check.clone(),
             created: unix_time(),
         };
         let generation = gens.create(&manifest, &extra_roots)?;
 
+        eprintln!("{name}: activating generation {generation}");
         let previous_units = st.units.clone();
         let result = systemd::switch(&previous_units, &units)
             .and_then(|()| health_check_run(name, &units, health_check.as_deref()));
@@ -396,8 +459,8 @@ impl Manager {
             }
             st.hold = Some(Hold {
                 reason: reason.clone(),
-                settings_hash,
-                flake_rev: locked.rev,
+                settings_hash: artifact.settings_hash,
+                flake_rev: artifact.flake_rev,
             });
             st.last_error = Some(reason.clone());
             return Ok(UpdateOutcome::RolledBack { reason });
@@ -405,7 +468,7 @@ impl Manager {
 
         st.generation = Some(generation);
         st.units = units;
-        st.locked_url = Some(locked.url);
+        st.locked_url = Some(artifact.flake_url);
         st.hold = None;
         st.degraded = false;
         st.last_error = None;
@@ -432,6 +495,39 @@ impl Manager {
     }
 }
 
+/// A produced service artifact plus its provenance and contents.
+#[derive(Default)]
+struct Artifact {
+    out: PathBuf,
+    driver: PathBuf,
+    flake_url: String,
+    flake_rev: String,
+    settings_hash: String,
+    flake_roots: Vec<String>,
+    units: Units,
+    health_check: Option<PathBuf>,
+}
+
+/// meta.json inside a service artifact; missing fields stay empty.
+#[derive(Default, serde::Deserialize)]
+struct ArtifactMeta {
+    #[serde(default)]
+    flake_url: String,
+    #[serde(default)]
+    flake_rev: String,
+    #[serde(default)]
+    settings_hash: String,
+}
+
+impl ArtifactMeta {
+    fn load(artifact: &Path) -> Self {
+        fs::read_to_string(artifact.join("meta.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str(&data).ok())
+            .unwrap_or_default()
+    }
+}
+
 /// Read units/ and the optional health-check from a built driver output.
 fn read_result(name: &str, out: &Path) -> Result<(Units, Option<PathBuf>)> {
     let units_dir = out.join("units");
@@ -445,8 +541,7 @@ fn read_result(name: &str, out: &Path) -> Result<(Units, Option<PathBuf>)> {
     if units.is_empty() {
         return Err(Error::NoUnits(name.into()));
     }
-    let health_check = out.join("health-check");
-    let health_check = health_check.exists().then(|| health_check.clone());
+    let health_check = Some(out.join("health-check")).filter(|p| p.exists());
     Ok((units, health_check))
 }
 

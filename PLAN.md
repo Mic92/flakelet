@@ -193,6 +193,27 @@ invocations (metadata, archive, eval, build):
 `flakelet deploy`, settings read from `--settings` and stored inline): one
 entry of `services.<name>` above.
 
+### Service artifact (self-describing build result)
+
+The driver builds one store path per service, and that artifact is the unit
+the rest of the system operates on:
+
+```
+/nix/store/…-flakelet-<name>/
+  meta.json      # schema version, name, flake_url + rev, settings hash
+  units/…        # unit files (settings baked in)
+  health-check   # optional executable
+  exports.json   # optional (drvs replaced by out paths)
+```
+
+The update flow is therefore: produce the artifact (evaluate the driver — or
+be handed one) → activate it (gc-root as generation, link units, health
+check, publish exports). `flakelet activate <store path>` is a first-class
+command; a service entry may set `prebuilt` (module option) instead of
+`flake`+`settings` — the two are mutually exclusive. Prebuilt artifacts are
+used by CI-primed deploys and tests that must not run nix at runtime;
+provenance stays visible via `meta.json` in `flakelet status`.
+
 `/var/lib/flakelet/<name>/state.json` — written by flakelet, atomic
 (tmp+rename):
 

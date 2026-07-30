@@ -17,7 +17,7 @@ in
     users.users.flakelet = {
       isSystemUser = true;
       group = "flakelet";
-      home = "/var/lib/flakelet";
+      home = "/var/cache/flakelet";
     };
     users.groups.flakelet = { };
 
@@ -31,31 +31,32 @@ in
       wantedBy = [ "multi-user.target" ];
     };
 
-    # Re-link the current generations early at boot; no evaluation, no network.
-    systemd.services.flakelet-boot = {
-      description = "Re-link flakelet services at boot";
-      wantedBy = [ "multi-user.target" ];
-      before = [ "flakelet.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${flakelet} boot";
+    systemd.services = {
+      # Re-link the current generations early at boot; no evaluation, no network.
+      flakelet-boot = {
+        description = "Re-link flakelet services at boot";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "flakelet.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${flakelet} boot";
+        };
       };
-    };
 
-    # Remove services that vanished from the host configuration; runs before
-    # the per-service update units on every configuration switch.
-    systemd.services.flakelet-reconcile = {
-      description = "Reconcile flakelet services with the host configuration";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "flakelet-boot.service" ];
-      restartTriggers = [ cfg.configFile ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${flakelet} reconcile";
+      # Remove services that vanished from the host configuration; runs before
+      # the per-service update units on every configuration switch.
+      flakelet-reconcile = {
+        description = "Reconcile flakelet services with the host configuration";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "flakelet-boot.service" ];
+        restartTriggers = [ cfg.configFile ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${flakelet} reconcile";
+        };
       };
-    };
-
-    systemd.services = lib.mapAttrs' (
+    }
+    // lib.mapAttrs' (
       name: svc:
       lib.nameValuePair "flakelet-${name}" {
         description = "Update flakelet service ${name}";

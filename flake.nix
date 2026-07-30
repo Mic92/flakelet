@@ -38,6 +38,8 @@
             ];
             services.flakelets = {
               package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.flakelet;
+              # The flake input source is already a store path; pkgs.path may not be.
+              nixpkgs = lib.mkDefault nixpkgs.outPath;
               adios = lib.mkDefault adios.outPath;
             };
           };
@@ -63,6 +65,9 @@
 
       checks = forAllSystems (system: {
         package = self.packages.${system}.flakelet;
+        vm = nixpkgs.legacyPackages.${system}.testers.runNixOSTest (
+          import ./tests/vm.nix { flakeletModule = self.nixosModules.flakelet; }
+        );
       });
     };
 }

@@ -2,13 +2,15 @@ use crate::config::{Config, Credentials, EvalSettings};
 use crate::error::{Error, Result};
 use serde::Deserialize;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Runs nix commands, optionally as an unprivileged user with a shared cache
 /// and fetch credentials for private flakes.
 pub struct Nix {
-    eval_user: Option<String>,
+    /// uid/gid to drop to for evaluation and fetching (owner of the cache dir).
+    eval_user: Option<(u32, u32)>,
     cache_dir: PathBuf,
     eval: EvalSettings,
     credentials: Credentials,
@@ -16,12 +18,13 @@ pub struct Nix {
 
 impl Nix {
     pub fn new(cfg: &Config, credentials: Option<&Credentials>) -> Self {
-        // Only drop privileges when we actually are root.
-        let eval_user = if unsafe { libc::geteuid() } == 0 {
-            cfg.eval_user.clone()
-        } else {
-            None
-        };
+        // Only drop privileges when we actually are root. The eval user's
+        // uid/gid is taken from the cache dir it owns; no NSS lookup needed.
+        let eval_user = (rustix::process::geteuid().is_root() && cfg.eval_user.is_some())
+            .then(|| rustix::fs::stat(&cfg.cache_dir).ok())
+            .flatten()
+            .map(|st| (st.st_uid, st.st_gid))
+            .filter(|&(uid, _)| uid != 0);
         Self {
             eval_user,
             cache_dir: cfg.cache_dir.clone(),
@@ -33,16 +36,26 @@ impl Nix {
         }
     }
 
+    /// Run as the unprivileged eval user (evaluation and fetching).
     fn run(&self, program: &str, args: &[String]) -> Result<String> {
-        let mut cmd = match &self.eval_user {
-            Some(user) => {
-                let mut c = Command::new("runuser");
-                c.arg("-u").arg(user).arg("--").arg(program);
-                c
-            }
-            None => Command::new(program),
-        };
-        cmd.args(args).env("XDG_CACHE_HOME", &self.cache_dir);
+        self.run_as(self.eval_user, program, args)
+    }
+
+    /// Run as the calling user (store writes and builds go through the daemon).
+    fn run_root(&self, program: &str, args: &[String]) -> Result<String> {
+        self.run_as(None, program, args)
+    }
+
+    fn run_as(&self, user: Option<(u32, u32)>, program: &str, args: &[String]) -> Result<String> {
+        let mut cmd = Command::new(program);
+        if let Some((uid, gid)) = user {
+            cmd.uid(uid).gid(gid);
+        }
+        // HOME must be readable by the eval user (~/.nix-defexpr etc.); the
+        // cache dir is owned by it.
+        cmd.args(args)
+            .env("HOME", &self.cache_dir)
+            .env("XDG_CACHE_HOME", &self.cache_dir);
         self.apply_credentials(&mut cmd)?;
         let out = cmd.output().map_err(|source| Error::Spawn {
             program: program.into(),
@@ -88,11 +101,14 @@ impl Nix {
     }
 
     /// Locked flake URL including narHash, suitable for a pure builtins.getFlake.
-    pub fn locked_url(&self, flake: &str) -> Result<LockedFlake> {
-        let out = self.run(
-            "nix",
-            &args(&["flake", "metadata", "--refresh", "--json", flake]),
-        )?;
+    /// `refresh` bypasses the tarball/eval caches to see new upstream revisions.
+    pub fn locked_url(&self, flake: &str, refresh: bool) -> Result<LockedFlake> {
+        let mut a = args(&["flake", "metadata", "--json"]);
+        if refresh {
+            a.push("--refresh".into());
+        }
+        a.push(flake.into());
+        let out = self.run("nix", &a)?;
         let meta: FlakeMetadata =
             serde_json::from_str(&out).map_err(Error::json("parse flake metadata"))?;
         let sep = if meta.url.contains('?') { '&' } else { '?' };
@@ -105,7 +121,7 @@ impl Nix {
 
     /// Add a rendered driver expression to the store.
     pub fn add_driver(&self, driver_file: &Path) -> Result<PathBuf> {
-        self.run(
+        self.run_root(
             "nix",
             &args(&[
                 "store",
@@ -165,7 +181,7 @@ impl Nix {
 
     /// Build a derivation with an out-link (indirect gc root) and return its output path.
     pub fn build(&self, drv_path: &str, out_link: &Path) -> Result<PathBuf> {
-        let out = self.run(
+        let out = self.run_root(
             "nix",
             &args(&[
                 "build",
