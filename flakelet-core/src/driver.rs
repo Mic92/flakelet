@@ -32,6 +32,16 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
     if let Some(adios) = &config.adios {
         let _ = writeln!(out, "  adios = import {};", adios.display());
     }
+    // Derivations in exports become their out paths, so consumers of the
+    // published exports.json execute store paths of the running generation.
+    out.push_str(
+        r#"  resolveExports = v:
+    if builtins.isAttrs v then
+      (if v ? type && v.type == "derivation" then "${v}" else builtins.mapAttrs (_: resolveExports) v)
+    else if builtins.isList v then map resolveExports v
+    else v;
+"#,
+    );
     let _ = writeln!(out, "in {{");
     for e in entries {
         let extra_modules = config
@@ -66,7 +76,12 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
     pkgs.linkFarm "flakelet-{raw_name}" ({{
       "meta.json" = pkgs.writeText "flakelet-{raw_name}-meta.json" {meta};
       units = pkgs.linkFarm "flakelet-{raw_name}-units" module.units;
-    }} // (if module ? healthCheck then {{ health-check = module.healthCheck; }} else {{ }}));"#,
+    }}
+    // (if module ? healthCheck then {{ health-check = module.healthCheck; }} else {{ }})
+    // (if module ? exports then {{
+      "exports.json" = pkgs.writeText "flakelet-{raw_name}-exports.json"
+        (builtins.toJSON (resolveExports module.exports));
+    }} else {{ }}));"#,
             attr = nix_string(e.name),
             url = nix_string(e.locked_url),
             output = e.output,

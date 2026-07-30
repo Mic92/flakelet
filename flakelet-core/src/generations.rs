@@ -20,6 +20,9 @@ pub struct Manifest {
     pub driver: PathBuf,
     /// Health check executable, if the module provided one.
     pub health_check: Option<PathBuf>,
+    /// Exports of this generation (derivations already replaced by out paths).
+    #[serde(default)]
+    pub exports: serde_json::Value,
     pub created: u64,
 }
 
@@ -122,6 +125,7 @@ mod tests {
             settings_hash: "h".into(),
             driver: "/nix/store/drv-driver.nix".into(),
             health_check: None,
+            exports: serde_json::Value::Null,
             created: 0,
         }
     }

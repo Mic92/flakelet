@@ -26,6 +26,8 @@ pub struct State {
     pub generation: Option<u32>,
     /// Currently linked units: name -> unit file store path.
     pub units: Units,
+    /// Exports of the active generation (also published under runtime_dir).
+    pub exports: serde_json::Value,
     /// Locked flake URL of the last successful update.
     pub locked_url: Option<String>,
     /// Pinned flake URL set by `flakelet lock`.
@@ -44,6 +46,7 @@ impl Default for State {
             origin: Origin::default(),
             generation: None,
             units: Units::new(),
+            exports: serde_json::Value::Null,
             locked_url: None,
             pin: None,
             hold: None,

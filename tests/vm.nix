@@ -18,6 +18,10 @@ let
               [Install]
               WantedBy=multi-user.target
             ''';
+            exports = {
+              metrics = [ { port = 9100; } ];
+              ports.web.port = settings.port;
+            };
           };
       };
     }
@@ -51,7 +55,10 @@ in
         adios = lib.mkForce null; # the test service does not use it
         services.web = {
           flake = "path:${testService}";
-          settings.greeting = "hello";
+          settings = {
+            greeting = "hello";
+            port = 8080;
+          };
         };
         services.static.prebuilt = prebuiltArtifact "static";
       };
@@ -97,6 +104,9 @@ in
     machine.succeed("systemctl show web.service -p Environment | grep -q GREETING=hello")
     machine.succeed("test -f /nix/var/nix/gcroots/flakelet/web/gen-1/manifest.json")
     machine.succeed("flakelet status | grep -q '^web'")
+
+    # Exports of the active generation are published for external consumers.
+    machine.succeed("grep -q '\"port\": 8080' /run/flakelet/exports/web.json")
 
     # A prebuilt artifact is activated without any evaluation.
     machine.succeed("systemctl start flakelet-static.service", timeout=120)

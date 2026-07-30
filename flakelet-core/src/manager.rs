@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::generations::{Generations, Manifest};
 use crate::state::{write_json_atomic, Hold, Origin, State};
 use crate::systemd::Units;
-use crate::{driver, lock, nix, settings, systemd};
+use crate::{driver, exports, lock, nix, settings, systemd};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -181,6 +181,7 @@ impl Manager {
         let _locks = self.locks(name, true, "remove")?;
         let st = State::load(&self.state_path(name))?;
         systemd::remove(&st.units)?;
+        exports::unpublish(&self.config.runtime_dir, name)?;
         Generations::new(&self.config.gcroot_dir, name).remove_all()?;
         fs::remove_dir_all(self.service_dir(name))
             .map_err(Error::io(format!("remove state of {name}")))?;
@@ -210,6 +211,7 @@ impl Manager {
             let st = State::load(&self.state_path(&name))?;
             if !st.units.is_empty() {
                 systemd::relink(&st.units)?;
+                exports::publish(&self.config.runtime_dir, &name, &st.exports)?;
                 linked.push(name);
             }
         }
@@ -259,8 +261,10 @@ impl Manager {
             .ok_or_else(|| Error::NoOlderGeneration(name.into()))?;
         let manifest = gens.manifest(target)?;
         systemd::switch(&st.units, &manifest.units)?;
+        exports::publish(&self.config.runtime_dir, name, &manifest.exports)?;
         st.generation = Some(target);
         st.units = manifest.units;
+        st.exports = manifest.exports;
         st.save(&self.state_path(name))?;
         Ok(target)
     }
@@ -356,10 +360,12 @@ impl Manager {
             self.evaluate(name, svc, &nix, &locked, &settings_hash)?
         };
 
-        (artifact.units, artifact.health_check) = read_result(name, &artifact.out)?;
-        self.check_unit_ownership(name, &artifact.units)?;
+        read_contents(name, &mut artifact)?;
+        self.check_conflicts(name, &artifact)?;
 
         if artifact.units == st.units && !opts.force {
+            // Exports may change without the units changing (e.g. a metrics hint).
+            exports::publish(&self.config.runtime_dir, name, &artifact.exports)?;
             st.degraded = false;
             st.last_error = None;
             return Ok(UpdateOutcome::UpToDate);
@@ -439,6 +445,7 @@ impl Manager {
             settings_hash: artifact.settings_hash.clone(),
             driver: artifact.driver,
             health_check: health_check.clone(),
+            exports: artifact.exports.clone(),
             created: unix_time(),
         };
         let generation = gens.create(&manifest, &extra_roots)?;
@@ -466,8 +473,10 @@ impl Manager {
             return Ok(UpdateOutcome::RolledBack { reason });
         }
 
+        exports::publish(&self.config.runtime_dir, name, &artifact.exports)?;
         st.generation = Some(generation);
         st.units = units;
+        st.exports = artifact.exports;
         st.locked_url = Some(artifact.flake_url);
         st.hold = None;
         st.degraded = false;
@@ -476,20 +485,22 @@ impl Manager {
         Ok(UpdateOutcome::Updated { generation })
     }
 
-    /// Refuse unit names that are already owned by another flakelet-managed service.
-    fn check_unit_ownership(&self, name: &str, units: &Units) -> Result<()> {
+    /// Refuse unit names or port claims that already belong to another
+    /// flakelet-managed service.
+    fn check_conflicts(&self, name: &str, artifact: &Artifact) -> Result<()> {
         for other in self.state_dirs()? {
             if other == name {
                 continue;
             }
             let st = State::load(&self.state_path(&other))?;
-            if let Some(unit) = units.keys().find(|u| st.units.contains_key(*u)) {
+            if let Some(unit) = artifact.units.keys().find(|u| st.units.contains_key(*u)) {
                 return Err(Error::UnitConflict {
                     service: name.into(),
                     unit: unit.clone(),
                     owner: other,
                 });
             }
+            exports::check_port_conflicts(name, &artifact.exports, &other, &st.exports)?;
         }
         Ok(())
     }
@@ -506,6 +517,7 @@ struct Artifact {
     flake_roots: Vec<String>,
     units: Units,
     health_check: Option<PathBuf>,
+    exports: serde_json::Value,
 }
 
 /// meta.json inside a service artifact; missing fields stay empty.
@@ -528,21 +540,28 @@ impl ArtifactMeta {
     }
 }
 
-/// Read units/ and the optional health-check from a built driver output.
-fn read_result(name: &str, out: &Path) -> Result<(Units, Option<PathBuf>)> {
-    let units_dir = out.join("units");
+/// Read units/, the optional health-check and exports from a built driver output.
+fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
+    let units_dir = artifact.out.join("units");
     let context = || format!("read {}", units_dir.display());
-    let mut units = Units::new();
     for entry in fs::read_dir(&units_dir).map_err(Error::io(context()))? {
         let entry = entry.map_err(Error::io(context()))?;
         let target = fs::canonicalize(entry.path()).map_err(Error::io(context()))?;
-        units.insert(entry.file_name().to_string_lossy().into_owned(), target);
+        artifact
+            .units
+            .insert(entry.file_name().to_string_lossy().into_owned(), target);
     }
-    if units.is_empty() {
+    if artifact.units.is_empty() {
         return Err(Error::NoUnits(name.into()));
     }
-    let health_check = Some(out.join("health-check")).filter(|p| p.exists());
-    Ok((units, health_check))
+    artifact.health_check = Some(artifact.out.join("health-check")).filter(|p| p.exists());
+    artifact.exports = match fs::read_to_string(artifact.out.join("exports.json")) {
+        Ok(data) => serde_json::from_str(&data)
+            .map_err(Error::json(format!("corrupt exports.json of {name}")))?,
+        Err(e) if e.kind() == ErrorKind::NotFound => serde_json::Value::Null,
+        Err(e) => return Err(Error::io(format!("read exports.json of {name}"))(e)),
+    };
+    Ok(())
 }
 
 fn health_check_run(name: &str, units: &Units, script: Option<&Path>) -> Result<()> {
@@ -592,6 +611,7 @@ mod tests {
             state_dir: dir.join("state"),
             gcroot_dir: dir.join("gcroots"),
             cache_dir: dir.join("cache"),
+            runtime_dir: dir.join("run"),
             ..Config::default()
         })
     }
@@ -634,18 +654,32 @@ mod tests {
     }
 
     #[test]
-    fn foreign_unit_names_are_rejected() {
+    fn foreign_unit_names_and_ports_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let mgr = manager(tmp.path());
         State {
             units: Units::from([("web.service".into(), "/nix/store/x".into())]),
+            exports: serde_json::json!({ "ports": { "http": { "port": 80 } } }),
             ..Default::default()
         }
         .save(&mgr.state_path("other"))
         .unwrap();
 
-        let units = Units::from([("web.service".into(), "/nix/store/y".into())]);
-        assert!(mgr.check_unit_ownership("mine", &units).is_err());
-        assert!(mgr.check_unit_ownership("other", &units).is_ok());
+        let mut artifact = Artifact {
+            units: Units::from([("web.service".into(), "/nix/store/y".into())]),
+            ..Artifact::default()
+        };
+        assert!(matches!(
+            mgr.check_conflicts("mine", &artifact),
+            Err(Error::UnitConflict { .. })
+        ));
+        assert!(mgr.check_conflicts("other", &artifact).is_ok());
+
+        artifact.units = Units::from([("api.service".into(), "/nix/store/y".into())]);
+        artifact.exports = serde_json::json!({ "ports": { "http": { "port": 80 } } });
+        assert!(matches!(
+            mgr.check_conflicts("mine", &artifact),
+            Err(Error::PortConflict { port: 80, .. })
+        ));
     }
 }

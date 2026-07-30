@@ -56,6 +56,15 @@ pub enum Error {
     NoBuildOutput(String),
     #[error("module of '{0}' produced no units")]
     NoUnits(String),
+    #[error(
+        "port {port}/{protocol} claimed by '{service}' is already claimed by service '{owner}'"
+    )]
+    PortConflict {
+        service: String,
+        port: u64,
+        protocol: String,
+        owner: String,
+    },
     #[error("unit '{unit}' of '{service}' is already managed by service '{owner}'")]
     UnitConflict {
         service: String,
