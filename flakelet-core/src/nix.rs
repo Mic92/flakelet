@@ -136,23 +136,37 @@ impl Nix {
         .map(PathBuf::from)
     }
 
-    /// Evaluate a driver expression with nix-eval-jobs.
-    pub fn eval_driver(&self, driver: &Path) -> Result<Vec<EvalJob>> {
+    /// Evaluate a driver expression with nix-eval-jobs. With `gc_roots_dir`
+    /// the evaluated derivations are rooted there, so they survive a garbage
+    /// collection until a later build picks them up.
+    pub fn eval_driver(&self, driver: &Path, gc_roots_dir: Option<&Path>) -> Result<Vec<EvalJob>> {
         let workers = self.eval.workers.unwrap_or(1);
         let max_memory = self
             .eval
             .max_memory_mb
             .unwrap_or_else(default_max_memory_mb);
-        let out = self.run(
-            "nix-eval-jobs",
-            &args(&[
-                "--workers",
-                &workers.to_string(),
-                "--max-memory-size",
-                &max_memory.to_string(),
-                &driver.display().to_string(),
-            ]),
-        )?;
+        let mut a = args(&[
+            "--workers",
+            &workers.to_string(),
+            "--max-memory-size",
+            &max_memory.to_string(),
+        ]);
+        if let Some(dir) = gc_roots_dir {
+            // nix-eval-jobs runs as the eval user; it must be able to create
+            // the root symlinks in this directory.
+            fs::create_dir_all(dir).map_err(Error::io(format!("create {}", dir.display())))?;
+            if let Some((uid, gid)) = self.eval_user {
+                rustix::fs::chown(
+                    dir,
+                    Some(rustix::fs::Uid::from_raw(uid)),
+                    Some(rustix::fs::Gid::from_raw(gid)),
+                )
+                .map_err(|e| Error::io(format!("chown {}", dir.display()))(e.into()))?;
+            }
+            a.extend(["--gc-roots-dir".into(), dir.display().to_string()]);
+        }
+        a.push(driver.display().to_string());
+        let out = self.run("nix-eval-jobs", &a)?;
         let mut jobs = Vec::new();
         for line in out.lines().filter(|l| !l.trim().is_empty()) {
             let job: EvalJob =
@@ -179,18 +193,15 @@ impl Nix {
         Ok(paths)
     }
 
-    /// Build a derivation with an out-link (indirect gc root) and return its output path.
-    pub fn build(&self, drv_path: &str, out_link: &Path) -> Result<PathBuf> {
-        let out = self.run_root(
-            "nix",
-            &args(&[
-                "build",
-                &format!("{drv_path}^*"),
-                "--print-out-paths",
-                "--out-link",
-                &out_link.display().to_string(),
-            ]),
-        )?;
+    /// Build a derivation and return its output path. With an out-link the
+    /// result is protected as an indirect gc root.
+    pub fn build(&self, drv_path: &str, out_link: Option<&Path>) -> Result<PathBuf> {
+        let mut a = args(&["build", &format!("{drv_path}^*"), "--print-out-paths"]);
+        match out_link {
+            Some(path) => a.extend(["--out-link".into(), path.display().to_string()]),
+            None => a.push("--no-link".into()),
+        }
+        let out = self.run_root("nix", &a)?;
         out.lines()
             .next()
             .map(PathBuf::from)

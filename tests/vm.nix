@@ -121,6 +121,12 @@ in
     machine.succeed("flakelet reconcile")
     machine.succeed("systemctl is-active web.service static.service cli.service")
 
+    # Off-machine style check: evaluate and build without touching state,
+    # rooting the results for a later deploy step.
+    # The directory must be reachable by the unprivileged eval user.
+    machine.succeed("flakelet check --build --no-refresh --gc-roots-dir /tmp/roots | grep -q '^web: built /nix/store/'")
+    machine.succeed("test -L /tmp/roots/web")
+
     # Boot relink restores a lost unit link.
     machine.succeed("rm /run/systemd/system/web.service")
     machine.succeed("flakelet boot")

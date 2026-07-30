@@ -12,4 +12,4 @@ pub mod systemd;
 
 pub use config::Config;
 pub use error::{Error, Result};
-pub use manager::{Manager, ServiceStatus, UpdateOpts, UpdateOutcome};
+pub use manager::{CheckOpts, CheckResult, Manager, ServiceStatus, UpdateOpts, UpdateOutcome};

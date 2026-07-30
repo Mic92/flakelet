@@ -33,6 +33,27 @@ pub enum UpdateOutcome {
     RolledBack { reason: String },
 }
 
+/// Options for the off-machine `check` pipeline.
+#[derive(Debug, Clone, Default)]
+pub struct CheckOpts {
+    /// Also build the evaluated artifacts.
+    pub build: bool,
+    /// Bypass flake caches when resolving refs.
+    pub refresh: bool,
+    /// Root the evaluated derivations (and built artifacts) here, so a later
+    /// build or deploy step still finds them after a garbage collection.
+    pub gc_roots_dir: Option<PathBuf>,
+}
+
+/// Result of an off-machine `check`/`build` of one service.
+#[derive(Debug, Serialize)]
+pub struct CheckResult {
+    pub name: String,
+    pub drv_path: String,
+    /// Output path when the artifact was also built.
+    pub out: Option<PathBuf>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ServiceStatus {
     pub name: String,
@@ -157,6 +178,71 @@ impl Manager {
                 })
             })
             .collect()
+    }
+
+    /// Resolve the flake refs of the given services (default: all with a
+    /// flake ref) and render one driver expression covering them.
+    /// Used by `check`/`build`/`driver`; needs no state, locks or root.
+    pub fn render_driver(&self, names: &[String], refresh: bool) -> Result<String> {
+        let mut resolved = Vec::new();
+        for (name, (svc, _)) in self.services()? {
+            if svc.prebuilt.is_some() || (!names.is_empty() && !names.contains(&name)) {
+                continue;
+            }
+            let locked = self.nix(&svc).locked_url(&svc.flake, refresh)?;
+            let hash = hash_settings(&svc);
+            resolved.push((name, svc, locked, hash));
+        }
+        let entries: Vec<DriverEntry> = resolved
+            .iter()
+            .map(|(name, svc, locked, hash)| DriverEntry {
+                name,
+                locked_url: &locked.url,
+                locked_rev: &locked.rev,
+                output: &svc.output,
+                settings: &svc.settings,
+                settings_hash: hash,
+            })
+            .collect();
+        Ok(driver::render(&self.config, &self.system, &entries))
+    }
+
+    /// Off-machine evaluation (and optionally build) of the configured
+    /// services, e.g. in CI against a rendered config.json.
+    pub fn check(&self, names: &[String], opts: &CheckOpts) -> Result<Vec<CheckResult>> {
+        let expr = self.render_driver(names, opts.refresh)?;
+        let nix = nix::Nix::new(&self.config, None);
+        // O_EXCL temp file with an unpredictable name, written through the
+        // open handle: nothing in a shared /tmp can plant a symlink or swap
+        // the contents before `nix store add` reads it.
+        let mut driver_file = tempfile::Builder::new()
+            .prefix("flakelet-driver-")
+            .suffix(".nix")
+            .tempfile()
+            .map_err(Error::io("create driver temp file"))?;
+        std::io::Write::write_all(&mut driver_file, expr.as_bytes())
+            .map_err(Error::io("write driver expression"))?;
+        let driver_store = nix.add_driver(driver_file.path())?;
+        let jobs = nix.eval_driver(&driver_store, opts.gc_roots_dir.as_deref())?;
+
+        let mut results = Vec::new();
+        for job in jobs {
+            let drv_path = job
+                .drv_path
+                .ok_or_else(|| Error::NoDerivation(job.attr.clone()))?;
+            let out = if opts.build {
+                let out_link = opts.gc_roots_dir.as_ref().map(|dir| dir.join(&job.attr));
+                Some(nix.build(&drv_path, out_link.as_deref())?)
+            } else {
+                None
+            };
+            results.push(CheckResult {
+                name: job.attr,
+                drv_path,
+                out,
+            });
+        }
+        Ok(results)
     }
 
     /// Register (or redefine) a manually deployed service.
@@ -400,14 +486,14 @@ impl Manager {
         let driver_store = nix.add_driver(&driver_file)?;
 
         eprintln!("{name}: evaluating {}", driver_store.display());
-        let jobs = nix.eval_driver(&driver_store)?;
+        let jobs = nix.eval_driver(&driver_store, None)?;
         let job = jobs
             .iter()
             .find(|j| j.attr == name)
             .and_then(|j| j.drv_path.as_deref())
             .ok_or_else(|| Error::NoDerivation(name.into()))?;
         eprintln!("{name}: building {job}");
-        let out = nix.build(job, &self.service_dir(name).join("result"))?;
+        let out = nix.build(job, Some(&self.service_dir(name).join("result")))?;
         Ok(Artifact {
             out,
             driver: driver_store,

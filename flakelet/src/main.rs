@@ -1,6 +1,6 @@
 use flakelet_core::config::ServiceConfig;
 use flakelet_core::error::Error;
-use flakelet_core::{Manager, Result, UpdateOpts, UpdateOutcome};
+use flakelet_core::{CheckOpts, Manager, Result, UpdateOpts, UpdateOutcome};
 use lexopt::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,9 @@ Commands:
                         Register and start a prebuilt service artifact (no evaluation)
   remove <name>         Stop a service and delete its state and generations
   reconcile             Remove declarative services that vanished from the host configuration
+  check [<name>...] [--build] [--gc-roots-dir <dir>]
+                        Resolve and evaluate configured services without touching state (CI)
+  driver [<name>...]    Print the rendered driver expression
   status [--json]       Show service status
   rollback <name>       Switch back to the previous generation
   lock <name>           Pin a service to the currently resolved flake revision
@@ -29,6 +32,9 @@ Commands:
 
 Options:
   --config <file>       Config file (default: /etc/flakelet/config.json)
+  --build               Also build the evaluated artifacts (check)
+  --gc-roots-dir <dir>  Root evaluated derivations and built artifacts there (check);
+                        the directory must be reachable by the eval user
   --force               Retry even if the service is held after a failed deploy
   --no-wait             Fail instead of waiting for another flakelet operation
   --offline-fallback    Keep the current units when evaluation fails due to network errors
@@ -50,6 +56,14 @@ enum Cmd {
         name: String,
     },
     Reconcile,
+    Check {
+        names: Vec<String>,
+        check: CheckOpts,
+    },
+    Driver {
+        names: Vec<String>,
+        opts: UpdateOpts,
+    },
     Status {
         json: bool,
     },
@@ -117,6 +131,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut output = None;
     let mut json = false;
     let mut keep = None;
+    let mut check = CheckOpts::default();
     while let Some(arg) = parser.next()? {
         match arg {
             Long("force") => opts.force = true,
@@ -127,6 +142,8 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("settings") => settings = Some(PathBuf::from(parser.value()?)),
             Long("output") => output = Some(parser.value()?.string()?),
             Long("json") => json = true,
+            Long("build") => check.build = true,
+            Long("gc-roots-dir") => check.gc_roots_dir = Some(PathBuf::from(parser.value()?)),
             Long("keep") => keep = Some(parser.value()?.parse()?),
             Long("help") | Short('h') => return Ok(None),
             Value(v) => names.push(v.string()?),
@@ -168,6 +185,11 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             name: one_name(&names)?,
         },
         "reconcile" => Cmd::Reconcile,
+        "check" => {
+            check.refresh = !opts.no_refresh;
+            Cmd::Check { names, check }
+        }
+        "driver" => Cmd::Driver { names, opts },
         "status" => Cmd::Status { json },
         "rollback" => Cmd::Rollback {
             name: one_name(&names)?,
@@ -216,6 +238,17 @@ fn run(cli: &Cli) -> Result<bool> {
             for removed in mgr.reconcile()? {
                 println!("{removed}: removed (no longer configured)");
             }
+        }
+        Cmd::Check { names, check } => {
+            for result in mgr.check(names, check)? {
+                match &result.out {
+                    Some(out) => println!("{}: built {}", result.name, out.display()),
+                    None => println!("{}: evaluated {}", result.name, result.drv_path),
+                }
+            }
+        }
+        Cmd::Driver { names, opts } => {
+            print!("{}", mgr.render_driver(names, !opts.no_refresh)?);
         }
         Cmd::Status { json } => print_status(&mgr, *json)?,
         Cmd::Rollback { name } => {
