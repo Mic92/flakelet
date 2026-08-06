@@ -59,7 +59,7 @@ free-form metadata like claimed ports or metrics endpoints. flakelet publishes
 the exports of the running generation to `/run/flakelet/exports/<name>.json`,
 where firewall, reverse-proxy, monitoring or backup tooling can pick them up.
 
-The template in `templates/service/flake.nix` shows all of this. PLAN.md
+The template in `templates/service/flake.nix` shows all of this. DESIGN.md
 describes the full contract.
 
 ## CLI
@@ -90,4 +90,4 @@ $ cargo test
 $ nix build .#checks.x86_64-linux.vm -L   # end-to-end NixOS VM test
 ```
 
-Design notes live in [PLAN.md](PLAN.md).
+Design notes live in [DESIGN.md](DESIGN.md).
