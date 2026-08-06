@@ -1,47 +1,17 @@
 # flakelet
 
-Runtime-managed native systemd services from Nix flakes.
+Run systemd services from Nix flakes and update them independently of the
+host system.
 
-Think `virtualisation.oci-containers`, but with flake references instead of
-container images: the host configuration only declares *which* flake to run
-and its settings; the target machine resolves, evaluates and builds the
-service at runtime and switches its systemd units. Services update
-independently of the host closure — no host rebuild, no image registry, no
-duplication of the nix store into squashfs images.
+**Status: alpha.** The design and the on-disk formats may still change. It
+has not run production services yet.
 
-```nix
-services.flakelets = {
-  enable = true;
-  services.grafana = {
-    flake = "github:example/grafana-flakelet";
-    settings.port = 3000;
-  };
-};
-```
-
-`flakelet update grafana` (or the generated timer) resolves the flake,
-evaluates it against the host's nixpkgs, builds plain unit files, links them
-into `/run/systemd/system` and starts them. Every update is a generation with
-gc roots; failed health checks roll back automatically.
-
-## A service flake
-
-```console
-$ nix flake init -t github:Mic92/flakelet
-```
-
-A service is a function from `{ pkgs, name, settings, ... }` to:
-
-- `units."<name>*.{service,socket,timer,target,path}"` — plain unit file
-  derivations (hardening via ordinary unit directives, `DynamicUser=`,
-  `StateDirectory=`, …)
-- `healthCheck` (optional) — executable derivation, run after activation;
-  failure rolls back
-- `exports` (optional) — metadata (claimed ports, metrics endpoints, proxy
-  hints, state folders) published to `/run/flakelet/exports/<name>.json` for
-  firewall/proxy/monitoring/backup integrations
-
-See `templates/service/flake.nix` and PLAN.md for the full contract.
+Normally a NixOS host has to be rebuilt to update one of its services.
+flakelet takes the same approach as `virtualisation.oci-containers`, but with
+flakes instead of container images. The host only declares which flake to run
+and which settings to pass. The machine itself resolves the flake, evaluates
+and builds it, and switches the systemd units. There are no images and no
+registry. The units run straight out of the host's nix store.
 
 ## Host configuration
 
@@ -62,8 +32,35 @@ See `templates/service/flake.nix` and PLAN.md for the full contract.
 }
 ```
 
-Secrets never go through settings: pass host file paths (sops-nix, clan vars)
-and consume them in the unit with `LoadCredential=`.
+Run `flakelet update myservice` on the machine, or let the generated timer do
+it. The update evaluates the flake against the host's nixpkgs, builds plain
+unit files, links them into `/run/systemd/system` and starts them. Every
+update becomes a generation with gc roots. If the service's health check
+fails, flakelet rolls back to the previous generation.
+
+Secrets never go through settings. Pass paths to host-managed secret files
+instead, for example from sops-nix, and load them in the unit with
+`LoadCredential=`.
+
+## Writing a service
+
+```console
+$ nix flake init -t github:Mic92/flakelet
+```
+
+A service flake exports a function. It receives the host's `pkgs`, the entry
+`name` and the `settings` from the host configuration. It returns the unit
+files to run, as plain derivations. Hardening is ordinary systemd
+configuration such as `DynamicUser=` and `StateDirectory=`.
+
+The function can also return a `healthCheck` script, which runs after every
+activation and triggers the rollback when it fails. It can return `exports`,
+free-form metadata like claimed ports or metrics endpoints. flakelet publishes
+the exports of the running generation to `/run/flakelet/exports/<name>.json`,
+where firewall, reverse-proxy, monitoring or backup tooling can pick them up.
+
+The template in `templates/service/flake.nix` shows all of this. PLAN.md
+describes the full contract.
 
 ## CLI
 
@@ -79,10 +76,11 @@ flakelet build <name>… [--out-link <dir>]                 like check, with res
 flakelet gc [--keep <n>]         prune old generations
 ```
 
-`flakelet check --machine eve --build --gc-roots-dir ./roots` evaluates the
-flakelet config of `nixosConfigurations.eve` from the current flake and builds
-all its service artifacts — use it in CI to catch broken services before they
-reach the machine and to prime the binary cache.
+The check command also works away from the machine. For example,
+`flakelet check --machine eve --build` evaluates the flakelet configuration
+of `nixosConfigurations.eve` in the current flake and builds all of its
+service artifacts. Run it in CI to catch broken services before they reach
+the machine and to fill the binary cache.
 
 ## Development
 
