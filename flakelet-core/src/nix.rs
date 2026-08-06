@@ -51,11 +51,14 @@ impl Nix {
         if let Some((uid, gid)) = user {
             cmd.uid(uid).gid(gid);
         }
-        // HOME must be readable by the eval user (~/.nix-defexpr etc.); the
-        // cache dir is owned by it.
-        cmd.args(args)
-            .env("HOME", &self.cache_dir)
-            .env("XDG_CACHE_HOME", &self.cache_dir);
+        cmd.args(args);
+        // When dropping privileges, HOME must be readable by the eval user
+        // (~/.nix-defexpr etc.); the cache dir is owned by it. Otherwise keep
+        // the caller's environment (check/driver run as a normal user).
+        if self.eval_user.is_some() {
+            cmd.env("HOME", &self.cache_dir)
+                .env("XDG_CACHE_HOME", &self.cache_dir);
+        }
         self.apply_credentials(&mut cmd)?;
         let out = cmd.output().map_err(|source| Error::Spawn {
             program: program.into(),
@@ -191,6 +194,19 @@ impl Nix {
         let mut paths = Vec::new();
         collect_archive_paths(&tree, &mut paths);
         Ok(paths)
+    }
+
+    /// Build a flake attribute (e.g. a machine's rendered config.json for
+    /// `check --machine`) and return its output path.
+    pub fn build_attr(&self, installable: &str) -> Result<PathBuf> {
+        let out = self.run_root(
+            "nix",
+            &args(&["build", "--print-out-paths", "--no-link", installable]),
+        )?;
+        out.lines()
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| Error::NoBuildOutput(installable.into()))
     }
 
     /// Build a derivation and return its output path. With an out-link the

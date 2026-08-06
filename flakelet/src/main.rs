@@ -21,9 +21,10 @@ Commands:
                         Register and start a prebuilt service artifact (no evaluation)
   remove <name>         Stop a service and delete its state and generations
   reconcile             Remove declarative services that vanished from the host configuration
-  check [<name>...] [--build] [--gc-roots-dir <dir>]
+  check [<name>...] [--build] [--gc-roots-dir <dir>] [--machine <name> [--flake <ref>]]
                         Resolve and evaluate configured services without touching state (CI)
-  driver [<name>...]    Print the rendered driver expression
+  driver [<name>...] [--machine <name> [--flake <ref>]]
+                        Print the rendered driver expression
   status [--json]       Show service status
   rollback <name>       Switch back to the previous generation
   lock <name>           Pin a service to the currently resolved flake revision
@@ -32,6 +33,8 @@ Commands:
 
 Options:
   --config <file>       Config file (default: /etc/flakelet/config.json)
+  --machine <name>      Use the flakelet config of nixosConfigurations.<name> from --flake
+                        (default: the flake in the current directory) instead of --config
   --build               Also build the evaluated artifacts (check)
   --gc-roots-dir <dir>  Root evaluated derivations and built artifacts there (check);
                         the directory must be reachable by the eval user
@@ -81,8 +84,18 @@ enum Cmd {
     },
 }
 
+/// Where the flakelet configuration comes from.
+enum ConfigSource {
+    File(PathBuf),
+    /// A nixosConfiguration in a flake (`--machine`, off-machine check).
+    Machine {
+        flake: String,
+        name: String,
+    },
+}
+
 struct Cli {
-    config: PathBuf,
+    config: ConfigSource,
     command: Cmd,
 }
 
@@ -132,6 +145,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut json = false;
     let mut keep = None;
     let mut check = CheckOpts::default();
+    let mut machine = None;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("force") => opts.force = true,
@@ -144,6 +158,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("json") => json = true,
             Long("build") => check.build = true,
             Long("gc-roots-dir") => check.gc_roots_dir = Some(PathBuf::from(parser.value()?)),
+            Long("machine") => machine = Some(parser.value()?.string()?),
             Long("keep") => keep = Some(parser.value()?.parse()?),
             Long("help") | Short('h') => return Ok(None),
             Value(v) => names.push(v.string()?),
@@ -163,7 +178,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         "deploy" => Cmd::Deploy {
             name: one_name(&names)?,
             svc: Box::new(ServiceConfig {
-                flake: flake.ok_or("deploy requires --flake")?,
+                flake: flake.clone().ok_or("deploy requires --flake")?,
                 settings: read_settings(settings.as_deref()).map_err(|e| e.to_string())?,
                 output: output.unwrap_or_else(|| ServiceConfig::default().output),
                 ..Default::default()
@@ -203,11 +218,30 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         "gc" => Cmd::Gc { keep },
         other => return Err(format!("unknown command '{other}'").into()),
     };
+    let config = match machine {
+        None => ConfigSource::File(config),
+        Some(name) if matches!(command, Cmd::Check { .. } | Cmd::Driver { .. }) => {
+            ConfigSource::Machine {
+                flake: flake.unwrap_or_else(|| ".".into()),
+                name,
+            }
+        }
+        Some(_) => return Err("--machine is only supported for check and driver".into()),
+    };
     Ok(Some(Cli { config, command }))
 }
 
 fn run(cli: &Cli) -> Result<bool> {
-    let mgr = Manager::load(&cli.config)?;
+    let config = match &cli.config {
+        ConfigSource::File(path) => path.clone(),
+        // Off-machine: build the machine's rendered config.json from its flake.
+        ConfigSource::Machine { flake, name } => {
+            flakelet_core::nix::Nix::new(&flakelet_core::Config::default(), None).build_attr(
+                &format!("{flake}#nixosConfigurations.{name}.config.services.flakelets.configFile"),
+            )?
+        }
+    };
+    let mgr = Manager::load(&config)?;
     match &cli.command {
         Cmd::Update { names, opts } => {
             let names = if names.is_empty() {
