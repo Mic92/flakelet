@@ -46,6 +46,11 @@
         default = self.nixosModules.flakelet;
       };
 
+      templates.default = {
+        path = ./templates/service;
+        description = "A flakelet service flake";
+      };
+
       devShells = forAllSystems (system: {
         default =
           let
