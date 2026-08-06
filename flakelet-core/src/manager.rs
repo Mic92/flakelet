@@ -43,6 +43,9 @@ pub struct CheckOpts {
     /// Root the evaluated derivations (and built artifacts) here, so a later
     /// build or deploy step still finds them after a garbage collection.
     pub gc_roots_dir: Option<PathBuf>,
+    /// Directory for per-service out-links of built artifacts
+    /// (default: gc_roots_dir).
+    pub out_links: Option<PathBuf>,
 }
 
 /// Result of an off-machine `check`/`build` of one service.
@@ -184,14 +187,24 @@ impl Manager {
     /// flake ref) and render one driver expression covering them.
     /// Used by `check`/`build`/`driver`; needs no state, locks or root.
     pub fn render_driver(&self, names: &[String], refresh: bool) -> Result<String> {
+        let services = self.services()?;
+        for name in names {
+            if !services.contains_key(name) {
+                return Err(Error::UnknownService(name.clone()));
+            }
+        }
         let mut resolved = Vec::new();
-        for (name, (svc, _)) in self.services()? {
+        for (name, (svc, _)) in services {
             if svc.prebuilt.is_some() || (!names.is_empty() && !names.contains(&name)) {
                 continue;
             }
             let locked = self.nix(&svc).locked_url(&svc.flake, refresh)?;
             let hash = hash_settings(&svc);
             resolved.push((name, svc, locked, hash));
+        }
+        // Silently "checking" nothing would look like success in CI.
+        if resolved.is_empty() {
+            return Err(Error::NothingToCheck);
         }
         let entries: Vec<DriverEntry> = resolved
             .iter()
@@ -231,7 +244,11 @@ impl Manager {
                 .drv_path
                 .ok_or_else(|| Error::NoDerivation(job.attr.clone()))?;
             let out = if opts.build {
-                let out_link = opts.gc_roots_dir.as_ref().map(|dir| dir.join(&job.attr));
+                let out_link = opts
+                    .out_links
+                    .as_ref()
+                    .or(opts.gc_roots_dir.as_ref())
+                    .map(|dir| dir.join(&job.attr));
                 Some(nix.build(&drv_path, out_link.as_deref())?)
             } else {
                 None

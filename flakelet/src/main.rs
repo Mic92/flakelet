@@ -23,6 +23,8 @@ Commands:
   reconcile             Remove declarative services that vanished from the host configuration
   check [<name>...] [--build] [--gc-roots-dir <dir>] [--machine <name> [--flake <ref>]]
                         Resolve and evaluate configured services without touching state (CI)
+  build <name>... [--out-link <dir>] [--machine <name> [--flake <ref>]]
+                        Like check, but build the artifacts with out-links in <dir> (default: .)
   driver [<name>...] [--machine <name> [--flake <ref>]]
                         Print the rendered driver expression
   status [--json]       Show service status
@@ -36,6 +38,7 @@ Options:
   --machine <name>      Use the flakelet config of nixosConfigurations.<name> from --flake
                         (default: the flake in the current directory) instead of --config
   --build               Also build the evaluated artifacts (check)
+  --out-link <dir>      Directory for per-service result symlinks (build)
   --gc-roots-dir <dir>  Root evaluated derivations and built artifacts there (check);
                         the directory must be reachable by the eval user
   --force               Retry even if the service is held after a failed deploy
@@ -124,12 +127,12 @@ fn main() -> ExitCode {
 /// Ok(None) means: help requested.
 fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut parser = lexopt::Parser::from_env();
-    let mut config = PathBuf::from("/etc/flakelet/config.json");
+    let mut config: Option<PathBuf> = None;
 
     // Global options until the first positional argument (the command).
     let command = loop {
         match parser.next()? {
-            Some(Long("config")) => config = parser.value()?.into(),
+            Some(Long("config")) => config = Some(parser.value()?.into()),
             Some(Long("help")) | Some(Short('h')) => return Ok(None),
             Some(Value(v)) => break v.string()?,
             Some(arg) => return Err(arg.unexpected()),
@@ -158,6 +161,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("json") => json = true,
             Long("build") => check.build = true,
             Long("gc-roots-dir") => check.gc_roots_dir = Some(PathBuf::from(parser.value()?)),
+            Long("out-link") => check.out_links = Some(PathBuf::from(parser.value()?)),
             Long("machine") => machine = Some(parser.value()?.string()?),
             Long("keep") => keep = Some(parser.value()?.parse()?),
             Long("help") | Short('h') => return Ok(None),
@@ -204,6 +208,15 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             check.refresh = !opts.no_refresh;
             Cmd::Check { names, check }
         }
+        "build" => {
+            if names.is_empty() {
+                return Err("build expects at least one service name".into());
+            }
+            check.build = true;
+            check.refresh = !opts.no_refresh;
+            check.out_links.get_or_insert_with(|| ".".into());
+            Cmd::Check { names, check }
+        }
         "driver" => Cmd::Driver { names, opts },
         "status" => Cmd::Status { json },
         "rollback" => Cmd::Rollback {
@@ -218,15 +231,18 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         "gc" => Cmd::Gc { keep },
         other => return Err(format!("unknown command '{other}'").into()),
     };
-    let config = match machine {
-        None => ConfigSource::File(config),
-        Some(name) if matches!(command, Cmd::Check { .. } | Cmd::Driver { .. }) => {
+    let config = match (machine, config) {
+        (None, config) => {
+            ConfigSource::File(config.unwrap_or_else(|| "/etc/flakelet/config.json".into()))
+        }
+        (Some(_), Some(_)) => return Err("--machine and --config are mutually exclusive".into()),
+        (Some(name), None) if matches!(command, Cmd::Check { .. } | Cmd::Driver { .. }) => {
             ConfigSource::Machine {
                 flake: flake.unwrap_or_else(|| ".".into()),
                 name,
             }
         }
-        Some(_) => return Err("--machine is only supported for check and driver".into()),
+        (Some(_), None) => return Err("--machine is only supported for check and driver".into()),
     };
     Ok(Some(Cli { config, command }))
 }

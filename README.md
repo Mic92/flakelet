@@ -75,6 +75,7 @@ flakelet lock/unlock <name>      pin to the currently resolved revision
 flakelet deploy <name> --flake <ref> --settings s.json    imperative service
 flakelet activate <name> <path>  start a prebuilt artifact, no evaluation
 flakelet check [--build] [--machine <host>]               CI: evaluate/build off-machine
+flakelet build <name>… [--out-link <dir>]                 like check, with result symlinks
 flakelet gc [--keep <n>]         prune old generations
 ```
 

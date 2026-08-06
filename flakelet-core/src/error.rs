@@ -34,6 +34,8 @@ pub enum Error {
     LockHeld { path: PathBuf, holder: String },
     #[error("service '{0}' is not configured")]
     UnknownService(String),
+    #[error("no services with a flake reference to check")]
+    NothingToCheck,
     #[error("service '{0}' was never deployed")]
     NeverDeployed(String),
     #[error("service '{0}' has no older generation to roll back to")]

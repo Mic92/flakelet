@@ -126,6 +126,8 @@ in
     # The directory must be reachable by the unprivileged eval user.
     machine.succeed("flakelet check --build --no-refresh --gc-roots-dir /tmp/roots | grep -q '^web: built /nix/store/'")
     machine.succeed("test -L /tmp/roots/web")
+    machine.succeed("flakelet build web --no-refresh --out-link /tmp/out && test -L /tmp/out/web")
+    machine.fail("flakelet check nosuchservice --no-refresh")
 
     # Boot relink restores a lost unit link.
     machine.succeed("rm /run/systemd/system/web.service")
