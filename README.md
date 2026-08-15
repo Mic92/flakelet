@@ -53,6 +53,30 @@ A service flake exports a function. It receives the host's `pkgs`, the entry
 files to run, as plain derivations. Hardening is ordinary systemd
 configuration such as `DynamicUser=` and `StateDirectory=`.
 
+Instead of writing unit files by hand, the injected `flakeletLib.mkService`
+offers a typed, NixOS-style interface:
+
+```nix
+flakelets.default = { pkgs, flakeletLib, name, settings, ... }:
+  flakeletLib.mkService {
+    services.${name} = {
+      # no [Install] section: only started when the socket is hit
+      serviceConfig.ExecStart = "${pkgs.myservice}/bin/serve";
+      serviceConfig.DynamicUser = true;
+    };
+    sockets.${name} = {
+      socketConfig.ListenStream = settings.port;
+      wantedBy = [ "sockets.target" ];
+    };
+  };
+```
+
+Units with an `[Install]` section (`wantedBy`) are enabled and started on
+activation. Units without one are left to systemd's on-demand activation: a
+socket-activated service starts on the first connection, a timer's job runs
+on its schedule, not at deploy time. Changed units that are running are
+restarted either way.
+
 The function can also return a `healthCheck` script, which runs after every
 activation and triggers the rollback when it fails. It can return `exports`,
 free-form metadata like claimed ports or metrics endpoints. flakelet publishes
@@ -67,7 +91,10 @@ describes the full contract.
 ```
 flakelet update [<name>…]        evaluate, build and activate
 flakelet status [--json]         generation, degraded/held state, lock holders
+flakelet diff <name>             closure diff: running generation vs. fresh eval
 flakelet rollback <name>         previous generation
+flakelet remove <name>           stop a service, delete state and generations
+flakelet reconcile               remove services dropped from the host config
 flakelet lock/unlock <name>      pin to the currently resolved revision
 flakelet deploy <name> --flake <ref> --settings s.json    imperative service
 flakelet activate <name> <path>  start a prebuilt artifact, no evaluation

@@ -393,11 +393,15 @@ A regular update proceeds like this:
    generation, record the error in the state and exit non-zero.
 3. If the new units are identical to the running ones, there is nothing to
    do.
-4. Otherwise switch: link the new generation's units into
-   `/run/systemd/system`, reload systemd, restart the units that changed,
-   enable and start the ones that are new, and finally stop, disable and
-   unlink the ones that disappeared. If any of this fails, switch back to the
-   previous generation's units.
+4. Otherwise switch: first stop, disable and unlink the units that
+   disappeared, so a renamed unit releases its ports before its successor
+   starts. Then link the new generation's units into `/run/systemd/system`,
+   reload systemd, and for every changed or new unit: enable and restart it
+   if it has an `[Install]` section; otherwise only try-restart it if it is
+   currently running. Units without `[Install]` are pulled in on demand, so a
+   socket-activated service stays inactive until a connection arrives and a
+   timer's job does not fire just because the service was deployed. If any of
+   this fails, switch back to the previous generation's units.
 5. Run the health check. First, no unit of the service may be in the `failed`
    state; socket- and timer-activated units are allowed to be inactive. Then,
    if the module shipped a `healthCheck` derivation, execute it and treat a

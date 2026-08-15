@@ -31,13 +31,15 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
         if old.get(unit) == Some(path) {
             continue;
         }
-        enable(unit, path)?;
-        let verb = if old.contains_key(unit) {
-            "restart"
-        } else {
-            "start"
-        };
-        systemctl(&[verb, unit])?;
+        if has_install(unit, path)? {
+            systemctl(&["enable", "--runtime", unit])?;
+            systemctl(&["restart", unit])?;
+        } else if old.contains_key(unit) {
+            // No [Install]: the unit is pulled in on demand (socket- or
+            // timer-activated). Restart it only if it is actually running;
+            // starting it eagerly would e.g. fire a timer's job on deploy.
+            systemctl(&["try-restart", unit])?;
+        }
     }
     Ok(())
 }
@@ -54,19 +56,16 @@ pub fn relink(units: &Units) -> Result<()> {
     }
     systemctl(&["daemon-reload"])?;
     for (unit, path) in units {
-        enable(unit, path)?;
+        if has_install(unit, path)? {
+            systemctl(&["enable", "--runtime", unit])?;
+        }
     }
     Ok(())
 }
 
-/// `systemctl enable` fails on units without an [Install] section, but units
-/// pulled in via Wants=/PartOf= legitimately have none, so skip those.
-fn enable(unit: &str, path: &PathBuf) -> Result<()> {
+fn has_install(unit: &str, path: &PathBuf) -> Result<bool> {
     let text = fs::read_to_string(path).map_err(Error::io(format!("read unit {unit}")))?;
-    if text.contains("[Install]") {
-        systemctl(&["enable", "--runtime", unit])?;
-    }
-    Ok(())
+    Ok(text.contains("[Install]"))
 }
 
 /// First unit of the service that is in failed state, if any.
