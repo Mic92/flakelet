@@ -38,6 +38,8 @@ pub enum Error {
     NothingToCheck,
     #[error("service '{0}' was never deployed")]
     NeverDeployed(String),
+    #[error("current generation of '{0}' predates diff support; run an update first")]
+    NoArtifactRecorded(String),
     #[error("service '{0}' has no older generation to roll back to")]
     NoOlderGeneration(String),
     #[error("settings of '{service}' reference dangling store path {path}")]

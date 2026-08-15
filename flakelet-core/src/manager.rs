@@ -265,6 +265,38 @@ impl Manager {
         Ok(results)
     }
 
+    /// Closure diff between the running generation and a fresh evaluation.
+    /// Read-only: takes no locks and writes no state, like `status`.
+    pub fn diff(&self, name: &str, refresh: bool) -> Result<String> {
+        let (svc, _) = self.service(name)?;
+        let st = State::load(&self.state_path(name))?;
+        let current = st
+            .generation
+            .ok_or_else(|| Error::NeverDeployed(name.into()))?;
+        let manifest = Generations::new(&self.config.gcroot_dir, name).manifest(current)?;
+        let old = manifest
+            .artifact
+            .ok_or_else(|| Error::NoArtifactRecorded(name.into()))?;
+        let new = match &svc.prebuilt {
+            Some(prebuilt) => prebuilt.clone(),
+            None => {
+                let opts = CheckOpts {
+                    build: true,
+                    refresh,
+                    ..CheckOpts::default()
+                };
+                let result = self
+                    .check(std::slice::from_ref(&name.to_string()), &opts)?
+                    .pop()
+                    .ok_or_else(|| Error::NoDerivation(name.into()))?;
+                result
+                    .out
+                    .ok_or_else(|| Error::NoBuildOutput(name.into()))?
+            }
+        };
+        nix::Nix::new(&self.config, svc.credentials.as_ref()).diff_closures(&old, &new)
+    }
+
     /// Register (or redefine) a manually deployed service.
     pub fn deploy(
         &self,
@@ -550,6 +582,7 @@ impl Manager {
             flake_rev: artifact.flake_rev.clone(),
             settings_hash: artifact.settings_hash.clone(),
             driver: artifact.driver,
+            artifact: Some(artifact.out.clone()),
             health_check: health_check.clone(),
             exports: artifact.exports.clone(),
             created: unix_time(),

@@ -665,8 +665,6 @@ pin a service to a known revision until you have reviewed the next one.
 - `flakelet options <name>` to render the adios option documentation of a
   service.
 - `flakelet check --override-ref` to pin revisions in pull-request CI.
-- `flakelet diff` using `nix store diff-closures` between the current and the
-  new evaluation.
 - A backup adapter consuming `exports.state`, for clan borgbackup and
   localbackup.
 - Firewall and reverse-proxy integrations consuming `exports.ports` and

@@ -18,6 +18,10 @@ pub struct Manifest {
     pub settings_hash: String,
     /// Store path of the driver expression that produced this generation.
     pub driver: PathBuf,
+    /// Store path of the built service artifact (`flakelet diff` compares
+    /// its closure against a fresh evaluation). Absent in old manifests.
+    #[serde(default)]
+    pub artifact: Option<PathBuf>,
     /// Health check executable, if the module provided one.
     pub health_check: Option<PathBuf>,
     /// Exports of this generation (derivations already replaced by out paths).
@@ -124,6 +128,7 @@ mod tests {
             flake_rev: "abc".into(),
             settings_hash: "h".into(),
             driver: "/nix/store/drv-driver.nix".into(),
+            artifact: None,
             health_check: None,
             exports: serde_json::Value::Null,
             created: 0,

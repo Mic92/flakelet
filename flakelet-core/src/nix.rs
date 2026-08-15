@@ -209,6 +209,20 @@ impl Nix {
             .ok_or_else(|| Error::NoBuildOutput(installable.into()))
     }
 
+    /// Human-readable closure diff between two store paths
+    /// (`nix store diff-closures`).
+    pub fn diff_closures(&self, old: &Path, new: &Path) -> Result<String> {
+        self.run_root(
+            "nix",
+            &args(&[
+                "store",
+                "diff-closures",
+                &old.display().to_string(),
+                &new.display().to_string(),
+            ]),
+        )
+    }
+
     /// Build a derivation and return its output path. With an out-link the
     /// result is protected as an indirect gc root.
     pub fn build(&self, drv_path: &str, out_link: Option<&Path>) -> Result<PathBuf> {

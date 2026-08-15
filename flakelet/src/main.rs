@@ -28,6 +28,7 @@ Commands:
   driver [<name>...] [--machine <name> [--flake <ref>]]
                         Print the rendered driver expression
   status [--json]       Show service status
+  diff <name>           Closure diff between the running generation and a fresh evaluation
   rollback <name>       Switch back to the previous generation
   lock <name>           Pin a service to the currently resolved flake revision
   unlock <name>         Remove the pin
@@ -72,6 +73,10 @@ enum Cmd {
     },
     Status {
         json: bool,
+    },
+    Diff {
+        name: String,
+        refresh: bool,
     },
     Rollback {
         name: String,
@@ -219,6 +224,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         }
         "driver" => Cmd::Driver { names, opts },
         "status" => Cmd::Status { json },
+        "diff" => Cmd::Diff {
+            name: one_name(&names)?,
+            refresh: !opts.no_refresh,
+        },
         "rollback" => Cmd::Rollback {
             name: one_name(&names)?,
         },
@@ -301,6 +310,14 @@ fn run(cli: &Cli) -> Result<bool> {
             print!("{}", mgr.render_driver(names, !opts.no_refresh)?);
         }
         Cmd::Status { json } => print_status(&mgr, *json)?,
+        Cmd::Diff { name, refresh } => {
+            let diff = mgr.diff(name, *refresh)?;
+            if diff.is_empty() {
+                println!("{name}: no closure changes");
+            } else {
+                println!("{diff}");
+            }
+        }
         Cmd::Rollback { name } => {
             let generation = mgr.rollback(name)?;
             println!("{name}: rolled back to generation {generation}");
