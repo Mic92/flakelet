@@ -16,6 +16,13 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
     if old == new {
         return Ok(());
     }
+    // Stop vanished units first: a renamed unit must release its ports and
+    // sockets before its successor starts.
+    for (unit, _) in old.iter().filter(|(u, _)| !new.contains_key(*u)) {
+        systemctl(&["disable", "--runtime", "--now", unit])?;
+        fs::remove_file(Path::new(RUNTIME_UNIT_DIR).join(unit))
+            .map_err(Error::io(format!("unlink unit {unit}")))?;
+    }
     for (unit, path) in new {
         link(unit, path)?;
     }
@@ -24,26 +31,13 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
         if old.get(unit) == Some(path) {
             continue;
         }
-        systemctl(&["enable", "--runtime", unit])?;
+        enable(unit, path)?;
         let verb = if old.contains_key(unit) {
             "restart"
         } else {
             "start"
         };
         systemctl(&[verb, unit])?;
-    }
-    let gone: Vec<&str> = old
-        .keys()
-        .filter(|u| !new.contains_key(*u))
-        .map(String::as_str)
-        .collect();
-    for unit in &gone {
-        systemctl(&["disable", "--runtime", "--now", unit])?;
-        fs::remove_file(Path::new(RUNTIME_UNIT_DIR).join(unit))
-            .map_err(Error::io(format!("unlink unit {unit}")))?;
-    }
-    if !gone.is_empty() {
-        systemctl(&["daemon-reload"])?;
     }
     Ok(())
 }
@@ -59,7 +53,17 @@ pub fn relink(units: &Units) -> Result<()> {
         link(unit, path)?;
     }
     systemctl(&["daemon-reload"])?;
-    for unit in units.keys() {
+    for (unit, path) in units {
+        enable(unit, path)?;
+    }
+    Ok(())
+}
+
+/// `systemctl enable` fails on units without an [Install] section, but units
+/// pulled in via Wants=/PartOf= legitimately have none, so skip those.
+fn enable(unit: &str, path: &PathBuf) -> Result<()> {
+    let text = fs::read_to_string(path).map_err(Error::io(format!("read unit {unit}")))?;
+    if text.contains("[Install]") {
         systemctl(&["enable", "--runtime", unit])?;
     }
     Ok(())
