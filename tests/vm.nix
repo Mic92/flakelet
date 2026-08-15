@@ -52,7 +52,6 @@ in
 
       services.flakelets = {
         enable = true;
-        adios = lib.mkForce null; # the test service does not use it
         services.web = {
           flake = "path:${testService}";
           settings = {

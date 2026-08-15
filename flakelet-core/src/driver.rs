@@ -54,19 +54,31 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             .join(" ");
         // With a nixpkgs override the module gets its own pkgs instance; the
         // artifact linkFarm still uses the shared (host) pkgs.
-        let pkgs_arg = match e.nixpkgs_override {
+        let entry_pkgs = match e.nixpkgs_override {
             Some(url) => format!(
-                "pkgs = import (builtins.getFlake {}).outPath {{ system = {}; }};",
+                "import (builtins.getFlake {}).outPath {{ system = {}; }}",
                 nix_string(url),
                 nix_string(system)
             ),
-            None => "inherit pkgs;".into(),
+            None => "pkgs".into(),
         };
-        let adios_arg = if config.adios.is_some() {
-            format!("{pkgs_arg} inherit adios;")
-        } else {
-            pkgs_arg
+        // Config::load guarantees adios is set whenever flakelet_lib is.
+        let lib_binding = match (&config.flakelet_lib, &config.adios) {
+            (Some(lib), Some(adios)) => format!(
+                "\n      flakeletLib = import {} {{ pkgs = entryPkgs; name = {}; adios = {}; }};",
+                lib.display(),
+                nix_string(e.name),
+                adios.display()
+            ),
+            _ => String::new(),
         };
+        let mut module_args = "pkgs = entryPkgs;".to_string();
+        if config.adios.is_some() {
+            module_args.push_str(" inherit adios;");
+        }
+        if config.flakelet_lib.is_some() {
+            module_args.push_str(" inherit flakeletLib;");
+        }
         let meta = serde_json::json!({
             "version": 1,
             "name": e.name,
@@ -78,8 +90,9 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             out,
             r#"  {attr} =
     let
+      entryPkgs = {entry_pkgs};{lib_binding}
       module = (builtins.getFlake {url}).{output} {{
-        {adios_arg}
+        {module_args}
         name = {name};
         settings = {settings};
         extraModules = [ {extra_modules} ];
@@ -97,7 +110,9 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             attr = nix_string(e.name),
             url = nix_string(e.locked_url),
             output = e.output,
-            adios_arg = adios_arg,
+            entry_pkgs = entry_pkgs,
+            lib_binding = lib_binding,
+            module_args = module_args,
             name = nix_string(e.name),
             settings = json_to_nix(e.settings),
             meta = nix_string(&meta.to_string()),
@@ -180,8 +195,37 @@ mod tests {
             expr.contains(r#"builtins.getFlake "github:me/grafana-svc/abc?narHash=sha256-xyz""#)
         );
         assert!(expr.contains(r#"settings = { "port" = 3000; };"#));
-        assert!(expr.contains("inherit pkgs; inherit adios;"));
+        assert!(expr.contains("entryPkgs = pkgs;"));
+        assert!(expr.contains("pkgs = entryPkgs; inherit adios;"));
         assert!(expr.contains(r#"\"settings_hash\":\"deadbeef\""#));
+    }
+
+    #[test]
+    fn render_driver_with_flakelet_lib() {
+        let config = Config {
+            nixpkgs: Some("/nix/store/aaa-source".into()),
+            adios: Some("/nix/store/bbb-adios".into()),
+            flakelet_lib: Some("/nix/store/ccc-flakelet-lib".into()),
+            ..Config::default()
+        };
+        let settings = json!({});
+        let expr = render(
+            &config,
+            "x86_64-linux",
+            &[DriverEntry {
+                name: "svc",
+                locked_url: "github:me/svc/abc?narHash=sha256-xyz",
+                locked_rev: "abc",
+                output: "flakelets.default",
+                settings: &settings,
+                settings_hash: "h",
+                nixpkgs_override: None,
+            }],
+        );
+        assert!(expr.contains(
+            r#"flakeletLib = import /nix/store/ccc-flakelet-lib { pkgs = entryPkgs; name = "svc"; adios = /nix/store/bbb-adios; };"#
+        ));
+        assert!(expr.contains("pkgs = entryPkgs; inherit adios; inherit flakeletLib;"));
     }
 
     #[test]
@@ -206,7 +250,7 @@ mod tests {
         );
         // The module gets its own pkgs from the override...
         assert!(expr.contains(
-            r#"pkgs = import (builtins.getFlake "github:NixOS/nixpkgs/def?narHash=sha256-npk").outPath { system = "x86_64-linux"; };"#
+            r#"entryPkgs = import (builtins.getFlake "github:NixOS/nixpkgs/def?narHash=sha256-npk").outPath { system = "x86_64-linux"; };"#
         ));
         // ...while the shared (host) pkgs still exists for the artifact linkFarm.
         assert!(expr.contains("pkgs = import /nix/store/aaa-source"));

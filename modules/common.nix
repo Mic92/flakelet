@@ -82,9 +82,13 @@ in
     };
 
     adios = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
+      type = lib.types.path;
       description = "adios library source injected into service modules.";
+    };
+
+    flakeletLib = lib.mkOption {
+      type = lib.types.path;
+      description = "flakelet.lib source (mkService, storePath), injected into service modules.";
     };
 
     extraModules = lib.mkOption {
@@ -132,7 +136,8 @@ in
       version = 1;
       eval_user = "flakelet";
       nixpkgs = "${cfg.nixpkgs}";
-      adios = lib.mapNullable toString cfg.adios;
+      adios = "${cfg.adios}";
+      flakelet_lib = "${cfg.flakeletLib}";
       extra_modules = map toString cfg.extraModules;
       eval = {
         workers = cfg.eval.workers;

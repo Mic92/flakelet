@@ -54,6 +54,8 @@ pub enum Error {
     DeclaredService(String),
     #[error("input override '{input}' of '{service}' is not supported; only 'nixpkgs' can be overridden")]
     UnsupportedInputOverride { service: String, input: String },
+    #[error("flakelet_lib requires adios to be configured (it provides the korora type checker)")]
+    LibRequiresAdios,
     #[error("driver evaluation produced no derivation for '{0}'")]
     NoDerivation(String),
     #[error("nix build of {0} produced no output path")]

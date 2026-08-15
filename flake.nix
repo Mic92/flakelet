@@ -41,6 +41,7 @@
               # The flake input source is already a store path; pkgs.path may not be.
               nixpkgs = lib.mkDefault nixpkgs.outPath;
               adios = lib.mkDefault adios.outPath;
+              flakeletLib = lib.mkDefault "${self}/lib";
             };
           };
         default = self.nixosModules.flakelet;
@@ -70,6 +71,7 @@
 
       checks = forAllSystems (system: {
         package = self.packages.${system}.flakelet;
+        lib = nixpkgs.legacyPackages.${system}.callPackage ./tests/lib.nix { adios = adios.outPath; };
         vm = nixpkgs.legacyPackages.${system}.testers.runNixOSTest (
           import ./tests/vm.nix { flakeletModule = self.nixosModules.flakelet; }
         );

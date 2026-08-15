@@ -25,11 +25,14 @@ The moving parts are deliberately few:
 2. The NixOS module `services.flakelets`. It renders the machine-wide
    configuration file `/etc/flakelet/config.json` and generates the systemd
    units and timers that trigger updates.
-3. A small set of Nix libraries that flakelet injects into service modules.
-   In version 1 this is only [adios](https://github.com/adisbladis/adios)
-   together with korora, which gives service authors typed options. A richer
-   `flakelet.lib` is planned but not required to get started, see the
-   Follow-ups section.
+3. A small set of Nix libraries that flakelet injects into service modules:
+   [adios](https://github.com/adisbladis/adios) together with korora, which
+   gives service authors typed options, and `flakelet.lib` (injected as
+   `flakeletLib`). Its `mkService` offers a typed, NixOS-style unit interface
+   with `services.<name>.serviceConfig`, `sockets` and `timers`, an automatic
+   name prefix, hard errors on unknown keys and a raw `units` escape hatch,
+   so existing NixOS modules can be ported by copy and paste. It also carries
+   the `storePath` helper described below.
 4. The service flakes themselves. They live in their own repositories and do
    not need any flake inputs, because everything they need is passed in as
    arguments.
@@ -201,9 +204,9 @@ One subtlety about settings that contain store paths: a string like
 built artifact does not depend on it and nix would happily garbage-collect
 it. flakelet therefore checks that such paths exist before evaluating and
 gc-roots them per generation. If a service needs actual build-time content
-from the host, it can use fetchTree with a narHash, at the cost of the
-content being re-added under a new store path. A nicer `storePath` helper is
-a follow-up.
+from the host, `flakeletLib.storePath` turns such a string into one with
+context (via `builtins.appendContext`, since `builtins.storePath` is banned
+in pure evaluation), making the artifact really depend on it.
 
 ## Files on the machine
 
@@ -650,12 +653,7 @@ pin a service to a known revision until you have reviewed the next one.
 
 ## Follow-ups
 
-- `flakelet.lib` as its own library. Its `mkService` would offer a typed,
-  NixOS-compatible unit interface with `services.<name>.serviceConfig`,
-  `sockets`, `timers` and NixOS naming and rendering, an automatic name
-  prefix, hard errors on unknown keys and the raw `units` escape hatch, so
-  existing NixOS modules can be ported by copy and paste. It would also carry
-  a `storePath` helper and shared hardening and exporter modules.
+- Shared hardening and exporter modules for `flakelet.lib`.
 - `flakelet export` and `import`. The export is an archive of the locked
   flake URL, the settings, the exports and the declared state folders,
   without store paths or secrets, wrapped in the preBackup and postBackup

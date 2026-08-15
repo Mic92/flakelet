@@ -22,6 +22,9 @@ pub struct Config {
     pub nixpkgs: Option<PathBuf>,
     /// Store path of the adios library source, injected into service modules.
     pub adios: Option<PathBuf>,
+    /// Store path of flakelet.lib (mkService, storePath), injected into
+    /// service modules as `flakeletLib`.
+    pub flakelet_lib: Option<PathBuf>,
     /// Extra host-provided helper modules passed to service functions.
     pub extra_modules: Vec<PathBuf>,
     pub eval: EvalSettings,
@@ -40,6 +43,7 @@ impl Default for Config {
             runtime_dir: "/run/flakelet".into(),
             nixpkgs: None,
             adios: None,
+            flakelet_lib: None,
             extra_modules: Vec::new(),
             eval: EvalSettings::default(),
             credentials: None,
@@ -115,6 +119,11 @@ impl Config {
                 })
             }
         };
+        // flakelet.lib imports korora from the adios source tree instead of
+        // vendoring a copy; fail early instead of deep inside an evaluation.
+        if cfg.flakelet_lib.is_some() && cfg.adios.is_none() {
+            return Err(Error::LibRequiresAdios);
+        }
         if cfg.version > SCHEMA_VERSION {
             return Err(Error::SchemaTooNew {
                 path: path.into(),
