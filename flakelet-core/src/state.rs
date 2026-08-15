@@ -2,8 +2,9 @@ use crate::config::SCHEMA_VERSION;
 use crate::error::{Error, Result};
 use crate::systemd::Units;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::Path;
 
 /// Where a service definition came from. Declarative services are removed by
@@ -27,7 +28,7 @@ pub struct State {
     /// Currently linked units: name -> unit file store path.
     pub units: Units,
     /// Exports of the active generation (also published under runtime_dir).
-    pub exports: serde_json::Value,
+    pub exports: Value,
     /// Locked flake URL of the last successful update.
     pub locked_url: Option<String>,
     /// Pinned flake URL set by `flakelet lock`.
@@ -46,7 +47,7 @@ impl Default for State {
             origin: Origin::default(),
             generation: None,
             units: Units::new(),
-            exports: serde_json::Value::Null,
+            exports: Value::Null,
             locked_url: None,
             pin: None,
             hold: None,
@@ -94,7 +95,7 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let context = || format!("cannot write {}", path.display());
     let dir = path.parent().ok_or_else(|| Error::Io {
         context: context(),
-        source: std::io::Error::new(ErrorKind::InvalidInput, "path has no parent directory"),
+        source: io::Error::new(ErrorKind::InvalidInput, "path has no parent directory"),
     })?;
     fs::create_dir_all(dir).map_err(Error::io(context()))?;
     let tmp = dir.join(format!(

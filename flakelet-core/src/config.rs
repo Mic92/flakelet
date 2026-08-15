@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
@@ -81,7 +82,7 @@ pub struct ServiceConfig {
     pub flake: String,
     pub output: String,
     /// Host settings, embedded into the driver expression as Nix values.
-    pub settings: serde_json::Value,
+    pub settings: Value,
     /// Store path of an already built driver output (units/, health-check).
     /// Skips resolution, evaluation and build.
     pub prebuilt: Option<PathBuf>,
@@ -96,7 +97,7 @@ impl Default for ServiceConfig {
         Self {
             flake: String::new(),
             output: "flakelets.default".into(),
-            settings: serde_json::Value::Object(Default::default()),
+            settings: Value::Object(Default::default()),
             prebuilt: None,
             input_overrides: BTreeMap::new(),
             keep_generations: 5,

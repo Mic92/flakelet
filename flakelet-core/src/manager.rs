@@ -6,12 +6,14 @@ use crate::state::{write_json_atomic, Hold, Origin, State};
 use crate::systemd::Units;
 use crate::{driver, exports, lock, nix, settings, systemd};
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::slice;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -236,7 +238,8 @@ impl Manager {
             .suffix(".nix")
             .tempfile()
             .map_err(Error::io("create driver temp file"))?;
-        std::io::Write::write_all(&mut driver_file, expr.as_bytes())
+        driver_file
+            .write_all(expr.as_bytes())
             .map_err(Error::io("write driver expression"))?;
         let driver_store = nix.add_driver(driver_file.path())?;
         let jobs = nix.eval_driver(&driver_store, opts.gc_roots_dir.as_deref())?;
@@ -286,7 +289,7 @@ impl Manager {
                     ..CheckOpts::default()
                 };
                 let result = self
-                    .check(std::slice::from_ref(&name.to_string()), &opts)?
+                    .check(slice::from_ref(&name.to_string()), &opts)?
                     .pop()
                     .ok_or_else(|| Error::NoDerivation(name.into()))?;
                 result
@@ -656,7 +659,7 @@ struct Artifact {
     flake_roots: Vec<String>,
     units: Units,
     health_check: Option<PathBuf>,
-    exports: serde_json::Value,
+    exports: Value,
 }
 
 /// meta.json inside a service artifact; missing fields stay empty.
@@ -736,7 +739,7 @@ fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     artifact.exports = match fs::read_to_string(artifact.out.join("exports.json")) {
         Ok(data) => serde_json::from_str(&data)
             .map_err(Error::json(format!("corrupt exports.json of {name}")))?,
-        Err(e) if e.kind() == ErrorKind::NotFound => serde_json::Value::Null,
+        Err(e) if e.kind() == ErrorKind::NotFound => Value::Null,
         Err(e) => return Err(Error::io(format!("read exports.json of {name}"))(e)),
     };
     Ok(())
@@ -873,7 +876,7 @@ mod tests {
             "web-worker.timer",
             "web-pre.target",
         ]);
-        assert!(validate_units("web", &ok, std::slice::from_ref(&host_dir)).is_ok());
+        assert!(validate_units("web", &ok, slice::from_ref(&host_dir)).is_ok());
 
         for bad in [
             "webfoo.service",

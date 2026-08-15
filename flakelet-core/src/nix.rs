@@ -1,6 +1,8 @@
 use crate::config::{Config, Credentials, EvalSettings};
 use crate::error::{Error, Result};
+use rustix::fs::{Gid, Uid};
 use serde::Deserialize;
+use serde_json::Value;
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -159,12 +161,8 @@ impl Nix {
             // the root symlinks in this directory.
             fs::create_dir_all(dir).map_err(Error::io(format!("create {}", dir.display())))?;
             if let Some((uid, gid)) = self.eval_user {
-                rustix::fs::chown(
-                    dir,
-                    Some(rustix::fs::Uid::from_raw(uid)),
-                    Some(rustix::fs::Gid::from_raw(gid)),
-                )
-                .map_err(|e| Error::io(format!("chown {}", dir.display()))(e.into()))?;
+                rustix::fs::chown(dir, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))
+                    .map_err(|e| Error::io(format!("chown {}", dir.display()))(e.into()))?;
             }
             a.extend(["--gc-roots-dir".into(), dir.display().to_string()]);
         }
@@ -189,7 +187,7 @@ impl Nix {
     /// so they can be gc-rooted for offline re-evaluation.
     pub fn flake_source_paths(&self, flake: &str) -> Result<Vec<String>> {
         let out = self.run("nix", &args(&["flake", "archive", "--json", flake]))?;
-        let tree: serde_json::Value =
+        let tree: Value =
             serde_json::from_str(&out).map_err(Error::json("parse nix flake archive output"))?;
         let mut paths = Vec::new();
         collect_archive_paths(&tree, &mut paths);
@@ -254,7 +252,7 @@ fn default_max_memory_mb() -> u64 {
 }
 
 /// `nix flake archive --json` output: nested { path, inputs: { <name>: ... } }.
-fn collect_archive_paths(value: &serde_json::Value, out: &mut Vec<String>) {
+fn collect_archive_paths(value: &Value, out: &mut Vec<String>) {
     let Some(obj) = value.as_object() else { return };
     if let Some(path) = obj.get("path").and_then(|p| p.as_str()) {
         out.push(path.to_string());

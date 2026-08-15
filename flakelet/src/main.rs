@@ -1,7 +1,9 @@
 use flakelet_core::config::ServiceConfig;
 use flakelet_core::error::Error;
+use flakelet_core::nix::Nix;
 use flakelet_core::{CheckOpts, Manager, Result, UpdateOpts, UpdateOutcome};
 use lexopt::prelude::*;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -260,11 +262,10 @@ fn run(cli: &Cli) -> Result<bool> {
     let config = match &cli.config {
         ConfigSource::File(path) => path.clone(),
         // Off-machine: build the machine's rendered config.json from its flake.
-        ConfigSource::Machine { flake, name } => {
-            flakelet_core::nix::Nix::new(&flakelet_core::Config::default(), None).build_attr(
-                &format!("{flake}#nixosConfigurations.{name}.config.services.flakelets.configFile"),
-            )?
-        }
+        ConfigSource::Machine { flake, name } => Nix::new(&flakelet_core::Config::default(), None)
+            .build_attr(&format!(
+                "{flake}#nixosConfigurations.{name}.config.services.flakelets.configFile"
+            ))?,
     };
     let mgr = Manager::load(&config)?;
     match &cli.command {
@@ -335,7 +336,7 @@ fn run(cli: &Cli) -> Result<bool> {
     Ok(true)
 }
 
-fn read_settings(path: Option<&Path>) -> Result<serde_json::Value> {
+fn read_settings(path: Option<&Path>) -> Result<Value> {
     let Some(path) = path else {
         return Ok(serde_json::json!({}));
     };
