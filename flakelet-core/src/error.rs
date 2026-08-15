@@ -71,6 +71,14 @@ pub enum Error {
         protocol: String,
         owner: String,
     },
+    #[error("unit '{unit}' of '{service}' must be named '{service}.<type>' or '{service}-*.<type>' with type one of service, socket, target, timer, path")]
+    InvalidUnitName { service: String, unit: String },
+    #[error("unit '{unit}' of '{service}' would shadow the host's unit at {path}")]
+    HostUnitConflict {
+        service: String,
+        unit: String,
+        path: PathBuf,
+    },
     #[error("unit '{unit}' of '{service}' is already managed by service '{owner}'")]
     UnitConflict {
         service: String,

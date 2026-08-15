@@ -679,6 +679,43 @@ impl ArtifactMeta {
     }
 }
 
+const UNIT_TYPES: &[&str] = &["service", "socket", "target", "timer", "path"];
+
+/// Unit dirs owned by the host; a runtime symlink would silently shadow them.
+const HOST_UNIT_DIRS: &[&str] = &[
+    "/etc/systemd/system",
+    "/usr/lib/systemd/system",
+    "/lib/systemd/system",
+];
+
+/// Enforce the service contract on unit names before anything is activated:
+/// names start with the entry name, only the supported unit types, and no
+/// shadowing of units the host already owns.
+fn validate_units(name: &str, units: &Units, host_dirs: &[PathBuf]) -> Result<()> {
+    for unit in units.keys() {
+        let ok = unit
+            .rsplit_once('.')
+            .is_some_and(|(base, suffix)| match suffix {
+                _ if !UNIT_TYPES.contains(&suffix) => false,
+                _ => base == name || base.starts_with(&format!("{name}-")),
+            });
+        if !ok {
+            return Err(Error::InvalidUnitName {
+                service: name.into(),
+                unit: unit.clone(),
+            });
+        }
+        if let Some(dir) = host_dirs.iter().find(|d| d.join(unit).exists()) {
+            return Err(Error::HostUnitConflict {
+                service: name.into(),
+                unit: unit.clone(),
+                path: dir.join(unit),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Read units/, the optional health-check and exports from a built driver output.
 fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     let units_dir = artifact.out.join("units");
@@ -693,6 +730,8 @@ fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     if artifact.units.is_empty() {
         return Err(Error::NoUnits(name.into()));
     }
+    let host_dirs: Vec<PathBuf> = HOST_UNIT_DIRS.iter().map(PathBuf::from).collect();
+    validate_units(name, &artifact.units, &host_dirs)?;
     artifact.health_check = Some(artifact.out.join("health-check")).filter(|p| p.exists());
     artifact.exports = match fs::read_to_string(artifact.out.join("exports.json")) {
         Ok(data) => serde_json::from_str(&data)
@@ -815,6 +854,49 @@ mod tests {
         assert_eq!(mgr.reconcile().unwrap(), vec!["gone".to_string()]);
         assert!(mgr.state_path("man").exists());
         assert!(!mgr.service_dir("gone").exists());
+    }
+
+    #[test]
+    fn unit_names_are_validated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_dir = tmp.path().to_path_buf();
+        let units = |names: &[&str]| -> Units {
+            names
+                .iter()
+                .map(|n| (n.to_string(), "/nix/store/x".into()))
+                .collect()
+        };
+
+        let ok = units(&[
+            "web.service",
+            "web.socket",
+            "web-worker.timer",
+            "web-pre.target",
+        ]);
+        assert!(validate_units("web", &ok, std::slice::from_ref(&host_dir)).is_ok());
+
+        for bad in [
+            "webfoo.service",
+            "other.service",
+            "web.mount",
+            "web",
+            "web-x.swap",
+        ] {
+            assert!(
+                matches!(
+                    validate_units("web", &units(&[bad]), &[]),
+                    Err(Error::InvalidUnitName { .. })
+                ),
+                "{bad} should be rejected"
+            );
+        }
+
+        // A unit the host already owns must not be shadowed.
+        fs::write(host_dir.join("web.service"), "").unwrap();
+        assert!(matches!(
+            validate_units("web", &units(&["web.service"]), &[host_dir]),
+            Err(Error::HostUnitConflict { .. })
+        ));
     }
 
     #[test]
