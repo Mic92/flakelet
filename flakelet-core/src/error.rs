@@ -50,8 +50,8 @@ pub enum Error {
     },
     #[error("service '{0}' is declared in the host configuration; not overriding it manually")]
     DeclaredService(String),
-    #[error("input_overrides of '{0}' are not implemented yet")]
-    InputOverridesUnsupported(String),
+    #[error("input override '{input}' of '{service}' is not supported; only 'nixpkgs' can be overridden")]
+    UnsupportedInputOverride { service: String, input: String },
     #[error("driver evaluation produced no derivation for '{0}'")]
     NoDerivation(String),
     #[error("nix build of {0} produced no output path")]

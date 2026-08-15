@@ -161,8 +161,11 @@ An update of a service walks through the following steps:
    store paths mentioned in the settings actually exist. Resolve the flake
    reference to a locked URL with revision and narHash using
    `nix flake metadata`; if the operator pinned the service with
-   `flakelet lock`, the pin wins. Entries in `input_overrides` are applied as
-   locked-reference rewrites.
+   `flakelet lock`, the pin wins. An `input_overrides.nixpkgs` entry is
+   resolved to a locked reference and replaces the pkgs instance injected
+   into that service; other input names are rejected, because
+   `builtins.getFlake` cannot rewrite a flake's own lock purely and the
+   service contract forbids flake inputs anyway.
 2. Render the driver expression and add it to the store with `nix store add`,
    where it is also gc-rooted. Keeping the driver around pays off when
    something goes wrong: every error message references the store path of the

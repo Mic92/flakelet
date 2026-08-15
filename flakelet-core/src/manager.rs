@@ -198,9 +198,11 @@ impl Manager {
             if svc.prebuilt.is_some() || (!names.is_empty() && !names.contains(&name)) {
                 continue;
             }
-            let locked = self.nix(&svc).locked_url(&svc.flake, refresh)?;
+            let nix = self.nix(&svc);
+            let locked = nix.locked_url(&svc.flake, refresh)?;
+            let nixpkgs = resolve_overrides(&name, &svc, &nix, refresh)?;
             let hash = hash_settings(&svc);
-            resolved.push((name, svc, locked, hash));
+            resolved.push((name, svc, locked, nixpkgs, hash));
         }
         // Silently "checking" nothing would look like success in CI.
         if resolved.is_empty() {
@@ -208,13 +210,14 @@ impl Manager {
         }
         let entries: Vec<DriverEntry> = resolved
             .iter()
-            .map(|(name, svc, locked, hash)| DriverEntry {
+            .map(|(name, svc, locked, nixpkgs, hash)| DriverEntry {
                 name,
                 locked_url: &locked.url,
                 locked_rev: &locked.rev,
                 output: &svc.output,
                 settings: &svc.settings,
                 settings_hash: hash,
+                nixpkgs_override: nixpkgs.as_ref().map(|n| n.url.as_str()),
             })
             .collect();
         Ok(driver::render(&self.config, &self.system, &entries))
@@ -409,9 +412,6 @@ impl Manager {
         st: &mut State,
         opts: UpdateOpts,
     ) -> Result<UpdateOutcome> {
-        if !svc.input_overrides.is_empty() {
-            return Err(Error::InputOverridesUnsupported(name.into()));
-        }
         let nix = self.nix(svc);
 
         // Settings referencing store paths must exist; they are gc-rooted per generation.
@@ -460,7 +460,8 @@ impl Manager {
                         .unwrap_or_default(),
                 });
             }
-            self.evaluate(name, svc, &nix, &locked, &settings_hash)?
+            let nixpkgs = resolve_overrides(name, svc, &nix, !opts.no_refresh)?;
+            self.evaluate(name, svc, &nix, &locked, nixpkgs.as_ref(), &settings_hash)?
         };
 
         read_contents(name, &mut artifact)?;
@@ -483,6 +484,7 @@ impl Manager {
         svc: &ServiceConfig,
         nix: &nix::Nix,
         locked: &nix::LockedFlake,
+        nixpkgs_override: Option<&nix::LockedFlake>,
         settings_hash: &str,
     ) -> Result<Artifact> {
         let expr = driver::render(
@@ -495,6 +497,7 @@ impl Manager {
                 output: &svc.output,
                 settings: &svc.settings,
                 settings_hash,
+                nixpkgs_override: nixpkgs_override.map(|n| n.url.as_str()),
             }],
         );
         let driver_file = self.service_dir(name).join("driver.nix");
@@ -690,11 +693,36 @@ fn health_check_run(name: &str, units: &Units, script: Option<&Path>) -> Result<
     Ok(())
 }
 
+/// Resolve input_overrides to locked references. Only 'nixpkgs' is supported:
+/// pkgs is the one dependency flakelet itself injects, so it can be swapped
+/// out here, while other inputs would require rewriting the flake's own lock,
+/// which builtins.getFlake cannot do purely (and the service contract forbids
+/// flake inputs anyway).
+fn resolve_overrides(
+    name: &str,
+    svc: &ServiceConfig,
+    nix: &nix::Nix,
+    refresh: bool,
+) -> Result<Option<nix::LockedFlake>> {
+    let mut nixpkgs = None;
+    for (input, flake_ref) in &svc.input_overrides {
+        if input != "nixpkgs" {
+            return Err(Error::UnsupportedInputOverride {
+                service: name.into(),
+                input: input.clone(),
+            });
+        }
+        nixpkgs = Some(nix.locked_url(flake_ref, refresh)?);
+    }
+    Ok(nixpkgs)
+}
+
 /// Change-detection hash over the parts of the definition that affect the build.
 fn hash_settings(svc: &ServiceConfig) -> String {
     let mut hasher = DefaultHasher::new();
     svc.output.hash(&mut hasher);
     svc.settings.to_string().hash(&mut hasher);
+    svc.input_overrides.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 

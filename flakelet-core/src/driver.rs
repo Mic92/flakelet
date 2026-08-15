@@ -12,6 +12,8 @@ pub struct DriverEntry<'a> {
     pub output: &'a str,
     pub settings: &'a Value,
     pub settings_hash: &'a str,
+    /// Locked nixpkgs URL from input_overrides.nixpkgs, replacing the shared pkgs.
+    pub nixpkgs_override: Option<&'a str>,
 }
 
 /// Render the driver expression that is added to the store and evaluated with
@@ -50,10 +52,20 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
             .join(" ");
+        // With a nixpkgs override the module gets its own pkgs instance; the
+        // artifact linkFarm still uses the shared (host) pkgs.
+        let pkgs_arg = match e.nixpkgs_override {
+            Some(url) => format!(
+                "pkgs = import (builtins.getFlake {}).outPath {{ system = {}; }};",
+                nix_string(url),
+                nix_string(system)
+            ),
+            None => "inherit pkgs;".into(),
+        };
         let adios_arg = if config.adios.is_some() {
-            "inherit pkgs adios;"
+            format!("{pkgs_arg} inherit adios;")
         } else {
-            "inherit pkgs;"
+            pkgs_arg
         };
         let meta = serde_json::json!({
             "version": 1,
@@ -85,6 +97,7 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             attr = nix_string(e.name),
             url = nix_string(e.locked_url),
             output = e.output,
+            adios_arg = adios_arg,
             name = nix_string(e.name),
             settings = json_to_nix(e.settings),
             meta = nix_string(&meta.to_string()),
@@ -157,6 +170,7 @@ mod tests {
                 output: "flakelets.default",
                 settings: &settings,
                 settings_hash: "deadbeef",
+                nixpkgs_override: None,
             }],
         );
         assert!(
@@ -166,7 +180,35 @@ mod tests {
             expr.contains(r#"builtins.getFlake "github:me/grafana-svc/abc?narHash=sha256-xyz""#)
         );
         assert!(expr.contains(r#"settings = { "port" = 3000; };"#));
-        assert!(expr.contains("inherit pkgs adios;"));
+        assert!(expr.contains("inherit pkgs; inherit adios;"));
         assert!(expr.contains(r#"\"settings_hash\":\"deadbeef\""#));
+    }
+
+    #[test]
+    fn render_driver_with_nixpkgs_override() {
+        let config = Config {
+            nixpkgs: Some("/nix/store/aaa-source".into()),
+            ..Config::default()
+        };
+        let settings = json!({});
+        let expr = render(
+            &config,
+            "x86_64-linux",
+            &[DriverEntry {
+                name: "svc",
+                locked_url: "github:me/svc/abc?narHash=sha256-xyz",
+                locked_rev: "abc",
+                output: "flakelets.default",
+                settings: &settings,
+                settings_hash: "h",
+                nixpkgs_override: Some("github:NixOS/nixpkgs/def?narHash=sha256-npk"),
+            }],
+        );
+        // The module gets its own pkgs from the override...
+        assert!(expr.contains(
+            r#"pkgs = import (builtins.getFlake "github:NixOS/nixpkgs/def?narHash=sha256-npk").outPath { system = "x86_64-linux"; };"#
+        ));
+        // ...while the shared (host) pkgs still exists for the artifact linkFarm.
+        assert!(expr.contains("pkgs = import /nix/store/aaa-source"));
     }
 }
