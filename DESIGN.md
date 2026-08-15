@@ -86,18 +86,28 @@ running generation simply stays active and the operator sees the error in the
 journal and in `flakelet status`.
 
 The value an output attribute holds may be a single flakelet module or an
-attrset of them. Each module returns up to three things:
+attrset of them. Each module returns up to two things:
 
 - `units`: an attrset from unit file name to a derivation containing the unit
   file. These are plain systemd units that reference store paths directly;
   the settings are baked into them at evaluation time.
-- `healthCheck` (optional): an executable derivation. flakelet runs it after
-  every activation. The check is shipped by the service rather than
-  configured on the host, because the service knows best how to probe itself.
-  It is built and gc-rooted together with the generation, so a rollback also
-  rolls back to the matching check.
 - `exports` (optional): metadata about what the service provides, described
   in its own section below.
+
+Health is expressed in the units themselves rather than in a flakelet-owned
+mechanism, because systemd already supervises starts with timeouts, journal
+logging and sandboxing. Readiness belongs in the service unit: `Type=notify`
+or an `ExecStartPost=` probe makes the start job fail when the service does
+not come up, and a failed start job rolls the activation back. For a deeper
+probe the service ships a `<name>-health.service` oneshot unit; flakelet
+starts it after every activation and a non-zero result triggers the
+rollback. The probe is a normal unit of the generation: it is gc-rooted with
+it, a rollback rolls back to the matching probe, `TimeoutStartSec=` bounds
+it, retries are ordinary probe options, and an operator can run it by hand at
+any time with `systemctl start`. The check is shipped by the service rather
+than configured on the host, because the service knows best how to probe
+itself. Ongoing liveness after activation is systemd's job, via `Restart=`
+and `WatchdogSec=`.
 
 All units of one entry form one generation. They are activated together and
 rolled back together, so a service consisting of a `.service` and a `.socket`
@@ -286,14 +296,13 @@ what the rest of the system operates on:
 /nix/store/…-flakelet-<name>/
   meta.json      # schema version, name, flake_url + rev, settings hash
   units/…        # unit files (settings baked in)
-  health-check   # optional executable
   exports.json   # optional (drvs replaced by out paths)
 ```
 
 Structuring the output this way splits every update into two halves that can
 be performed independently. The first half produces the artifact, normally by
 evaluating the driver on the machine. The second half activates it: gc-root
-it as a new generation, link the units, run the health check, publish the
+it as a new generation, link the units, run the health probe, publish the
 exports. Because activation only needs the artifact and nothing else, it also
 works when someone else already built it. `flakelet activate <name> <store
 path>` does exactly that, and a declarative service can set `prebuilt`
@@ -402,12 +411,12 @@ A regular update proceeds like this:
    socket-activated service stays inactive until a connection arrives and a
    timer's job does not fire just because the service was deployed. If any of
    this fails, switch back to the previous generation's units.
-5. Run the health check. First, no unit of the service may be in the `failed`
-   state; socket- and timer-activated units are allowed to be inactive. Then,
-   if the module shipped a `healthCheck` derivation, execute it and treat a
-   non-zero exit as unhealthy. Retry and timeout logic lives inside the check
-   itself, where the service author can tune it.
-6. If activation or the health check failed, switch back to the previous
+5. Verify health. If the generation ships a `<name>-health.service` probe
+   unit, start it and treat a failed start job as unhealthy; systemd provides
+   the timeout, the journal entry and the sandbox. Then no unit of the
+   service may be in the `failed` state; socket- and timer-activated units
+   are allowed to be inactive.
+6. If activation or the health probe failed, switch back to the previous
    generation. Its unit files still exist in the store and have their old
    settings baked in, so this is a pure symlink-and-restart operation. Record
    a hold with the reason and exit non-zero.
@@ -500,7 +509,7 @@ flakelet gc [--keep N]
 
 The Rust workspace has two crates. `flakelet-core` is a library containing
 the config and state types, driver generation, locking, evaluation, build,
-activation, rollback, gc and health checks. It is blocking code with no
+activation, rollback, gc and health probes. It is blocking code with no
 global state, so it can be embedded elsewhere; a future web service for
 remote deploy triggers would link it directly, and the file locks already
 make the CLI and such a service safe to run side by side on one machine.

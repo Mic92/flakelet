@@ -68,6 +68,18 @@ fn has_install(unit: &str, path: &PathBuf) -> Result<bool> {
     Ok(text.contains("[Install]"))
 }
 
+/// Start a oneshot probe unit; Ok(false) when the start job failed.
+pub fn start_oneshot(unit: &str) -> Result<bool> {
+    let status = Command::new("systemctl")
+        .args(["start", unit])
+        .status()
+        .map_err(|source| Error::Spawn {
+            program: "systemctl".into(),
+            source,
+        })?;
+    Ok(status.success())
+}
+
 /// First unit of the service that is in failed state, if any.
 pub fn any_failed(units: &Units) -> Result<Option<String>> {
     for unit in units.keys() {

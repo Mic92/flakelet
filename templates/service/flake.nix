@@ -31,10 +31,14 @@
         # published to /run/flakelet/exports/<name>.json on the host.
         exports.ports.http.port = settings.port or 8000;
 
-        # Optional: executable derivation run after activation; a non-zero exit
-        # rolls the service back to the previous generation.
-        healthCheck = pkgs.writeShellScript "${name}-health" ''
-          exec ${pkgs.curl}/bin/curl -sf http://127.0.0.1:${toString (settings.port or 8000)}/ > /dev/null
+        # Optional health probe: started after every activation, a failure
+        # rolls the service back.
+        units."${name}-health.service" = pkgs.writeText "${name}-health.service" ''
+          [Service]
+          Type=oneshot
+          DynamicUser=true
+          TimeoutStartSec=1min
+          ExecStart=${pkgs.curl}/bin/curl -sf --retry 5 --retry-connrefused --retry-delay 2 http://127.0.0.1:${toString (settings.port or 8000)}/ -o /dev/null
         '';
       };
   };

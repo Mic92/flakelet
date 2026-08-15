@@ -35,8 +35,8 @@ registry. The units run straight out of the host's nix store.
 Run `flakelet update myservice` on the machine, or let the generated timer do
 it. The update evaluates the flake against the host's nixpkgs, builds plain
 unit files, links them into `/run/systemd/system` and starts them. Every
-update becomes a generation with gc roots. If the service's health check
-fails, flakelet rolls back to the previous generation.
+update becomes a generation with gc roots. If activation or the service's
+health probe fails, flakelet rolls back to the previous generation.
 
 Secrets never go through settings. Pass paths to host-managed secret files
 instead, for example from sops-nix, and load them in the unit with
@@ -77,8 +77,11 @@ socket-activated service starts on the first connection, a timer's job runs
 on its schedule, not at deploy time. Changed units that are running are
 restarted either way.
 
-The function can also return a `healthCheck` script, which runs after every
-activation and triggers the rollback when it fails. It can return `exports`,
+Health lives in the units: `Type=notify` or `ExecStartPost=` for readiness,
+`Restart=` for liveness. A service can additionally ship a
+`<name>-health.service` oneshot (or pass `healthCheck` to `mkService`);
+flakelet starts it after every activation and rolls back when it fails.
+The function can also return `exports`,
 free-form metadata like claimed ports or metrics endpoints. flakelet publishes
 the exports of the running generation to `/run/flakelet/exports/<name>.json`,
 where firewall, reverse-proxy, monitoring or backup tooling can pick them up.

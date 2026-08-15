@@ -12,7 +12,6 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::slice;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -571,7 +570,6 @@ impl Manager {
         soft_refs: Vec<String>,
     ) -> Result<UpdateOutcome> {
         let units = artifact.units.clone();
-        let health_check = artifact.health_check.clone();
         // Commit the generation (gc roots) before touching any unit. Root the
         // flake source + inputs too, so re-evals work offline.
         let gens = Generations::new(&self.config.gcroot_dir, name);
@@ -586,7 +584,6 @@ impl Manager {
             settings_hash: artifact.settings_hash.clone(),
             driver: artifact.driver,
             artifact: Some(artifact.out.clone()),
-            health_check: health_check.clone(),
             exports: artifact.exports.clone(),
             created: unix_time(),
         };
@@ -594,9 +591,8 @@ impl Manager {
 
         eprintln!("{name}: activating generation {generation}");
         let previous_units = st.units.clone();
-        let eval_user = self.nix(svc).eval_user();
-        let result = systemd::switch(&previous_units, &units)
-            .and_then(|()| health_check_run(name, &units, health_check.as_deref(), eval_user));
+        let result =
+            systemd::switch(&previous_units, &units).and_then(|()| health_check_run(name, &units));
 
         if let Err(err) = result {
             let reason = err.to_string();
@@ -659,7 +655,6 @@ struct Artifact {
     settings_hash: String,
     flake_roots: Vec<String>,
     units: Units,
-    health_check: Option<PathBuf>,
     exports: Value,
 }
 
@@ -720,7 +715,7 @@ fn validate_units(name: &str, units: &Units, host_dirs: &[PathBuf]) -> Result<()
     Ok(())
 }
 
-/// Read units/, the optional health-check and exports from a built driver output.
+/// Read units/ and the optional exports from a built driver output.
 fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     let units_dir = artifact.out.join("units");
     let context = || format!("read {}", units_dir.display());
@@ -736,7 +731,6 @@ fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     }
     let host_dirs: Vec<PathBuf> = HOST_UNIT_DIRS.iter().map(PathBuf::from).collect();
     validate_units(name, &artifact.units, &host_dirs)?;
-    artifact.health_check = Some(artifact.out.join("health-check")).filter(|p| p.exists());
     artifact.exports = match fs::read_to_string(artifact.out.join("exports.json")) {
         Ok(data) => serde_json::from_str(&data)
             .map_err(Error::json(format!("corrupt exports.json of {name}")))?,
@@ -746,33 +740,20 @@ fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     Ok(())
 }
 
-fn health_check_run(
-    name: &str,
-    units: &Units,
-    script: Option<&Path>,
-    eval_user: Option<(u32, u32)>,
-) -> Result<()> {
+/// Start the optional `<name>-health.service` probe, then check for failed
+/// units. Readiness/liveness beyond that is the units' own business.
+fn health_check_run(name: &str, units: &Units) -> Result<()> {
+    let probe = format!("{name}-health.service");
+    if units.contains_key(&probe) && !systemd::start_oneshot(&probe)? {
+        return Err(Error::HealthCheckFailed {
+            service: name.into(),
+            unit: probe,
+        });
+    }
     if let Some(unit) = systemd::any_failed(units)? {
         return Err(Error::UnitFailed {
             service: name.into(),
             unit,
-        });
-    }
-    let Some(script) = script else { return Ok(()) };
-    // The check is service-provided code; a probe needs no root privileges.
-    let mut cmd = Command::new(script);
-    if let Some((uid, gid)) = eval_user {
-        use std::os::unix::process::CommandExt;
-        cmd.uid(uid).gid(gid);
-    }
-    let status = cmd.status().map_err(|source| Error::Spawn {
-        program: script.display().to_string(),
-        source,
-    })?;
-    if !status.success() {
-        return Err(Error::HealthCheckFailed {
-            service: name.into(),
-            script: script.into(),
         });
     }
     Ok(())

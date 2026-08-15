@@ -76,12 +76,6 @@ impl Nix {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
-    /// uid/gid evaluation drops to; used to run other untrusted helpers
-    /// (e.g. health checks) with the same privileges.
-    pub fn eval_user(&self) -> Option<(u32, u32)> {
-        self.eval_user
-    }
-
     fn apply_credentials(&self, cmd: &mut Command) -> Result<()> {
         let creds = &self.credentials;
         let mut nix_config = String::new();

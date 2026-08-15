@@ -83,7 +83,7 @@ pub struct ServiceConfig {
     pub output: String,
     /// Host settings, embedded into the driver expression as Nix values.
     pub settings: Value,
-    /// Store path of an already built driver output (units/, health-check).
+    /// Store path of an already built driver output (units/, exports.json).
     /// Skips resolution, evaluation and build.
     pub prebuilt: Option<PathBuf>,
     pub input_overrides: BTreeMap<String, String>,

@@ -22,8 +22,6 @@ pub struct Manifest {
     /// its closure against a fresh evaluation). Absent in old manifests.
     #[serde(default)]
     pub artifact: Option<PathBuf>,
-    /// Health check executable, if the module provided one.
-    pub health_check: Option<PathBuf>,
     /// Exports of this generation (derivations already replaced by out paths).
     #[serde(default)]
     pub exports: serde_json::Value,
@@ -80,7 +78,6 @@ impl Generations {
         let roots = manifest
             .units
             .values()
-            .chain(manifest.health_check.iter())
             .map(|p| p.display().to_string())
             .chain([manifest.driver.display().to_string()])
             .chain(extra_roots.iter().cloned());
@@ -129,7 +126,6 @@ mod tests {
             settings_hash: "h".into(),
             driver: "/nix/store/drv-driver.nix".into(),
             artifact: None,
-            health_check: None,
             exports: serde_json::Value::Null,
             created: 0,
         }

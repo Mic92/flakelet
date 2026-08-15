@@ -89,8 +89,8 @@ pub enum Error {
     },
     #[error("unit '{unit}' of '{service}' failed after start")]
     UnitFailed { service: String, unit: String },
-    #[error("health check {script} of '{service}' failed")]
-    HealthCheckFailed { service: String, script: PathBuf },
+    #[error("health probe unit '{unit}' of '{service}' failed")]
+    HealthCheckFailed { service: String, unit: String },
     #[error("rollback of '{service}' after failed deploy also failed: {source}")]
     RollbackFailed {
         service: String,

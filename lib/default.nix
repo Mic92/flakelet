@@ -81,7 +81,10 @@ let
       targets = t.attrsOf (unitType "target" { });
       paths = t.attrsOf (unitType "path" { pathConfig = configSection; });
       units = t.attrsOf t.derivation;
-      healthCheck = t.derivation;
+      healthCheck = t.union [
+        t.derivation
+        t.string
+      ];
       exports = t.any;
     }).override
       {
@@ -155,8 +158,27 @@ in
     args:
     let
       a = check argsType args;
+      # Sugar for the `<name>-health.service` probe contract; define
+      # services.health directly for full control.
+      services =
+        (a.services or { })
+        // lib.optionalAttrs (a ? healthCheck) {
+          health =
+            if a ? services.health then
+              throw "flakeletLib.mkService: healthCheck and services.health are mutually exclusive"
+            else
+              {
+                description = "health probe for ${name}";
+                serviceConfig = {
+                  Type = "oneshot";
+                  ExecStart = a.healthCheck;
+                  DynamicUser = true;
+                  TimeoutStartSec = "1min";
+                };
+              };
+        };
       units =
-        renderGroup ".service" serviceSection (a.services or { })
+        renderGroup ".service" serviceSection services
         // renderGroup ".socket" (def: section "Socket" (def.socketConfig or { })) (a.sockets or { })
         // renderGroup ".timer" (def: section "Timer" (def.timerConfig or { })) (a.timers or { })
         // renderGroup ".target" (_: "") (a.targets or { })
@@ -167,9 +189,7 @@ in
     if units == { } then
       throw "flakeletLib.mkService: no units defined"
     else
-      { inherit units; }
-      // lib.optionalAttrs (a ? healthCheck) { inherit (a) healthCheck; }
-      // lib.optionalAttrs (a ? exports) { inherit (a) exports; };
+      { inherit units; } // lib.optionalAttrs (a ? exports) { inherit (a) exports; };
 
   # Turn a bare store path string from the settings into a string with context,
   # so the built artifact really depends on it. builtins.storePath is banned in

@@ -46,6 +46,7 @@ let
       wantedBy = [ "paths.target" ];
     };
     units."web-raw.service" = writeText "web-raw.service" "[Service]\n";
+    healthCheck = "/bin/probe";
     exports.ports.http.port = 8080;
   };
 
@@ -66,6 +67,7 @@ assert builtins.hasContext helloPath;
 assert result.exports.ports.http.port == 8080;
 assert lib.attrNames result.units == [
   "web-gc.timer"
+  "web-health.service"
   "web-pre.target"
   "web-raw.service"
   "web-watch.path"
@@ -73,6 +75,7 @@ assert lib.attrNames result.units == [
   "web.service"
   "web.socket"
 ];
+assert !(result ? healthCheck);
 runCommand "flakelet-lib-test" { units = linkFarm "flakelet-lib-test-units" result.units; } ''
   s=$units/web.service
   grep -qx 'Description=demo web service' $s
@@ -89,5 +92,7 @@ runCommand "flakelet-lib-test" { units = linkFarm "flakelet-lib-test-units" resu
   grep -qx 'ExecStart=/bin/false worker' $units/web-worker.service
   grep -qx 'Description=setup done' $units/web-pre.target
   grep -qx 'PathChanged=/var/lib/web' $units/web-watch.path
+  grep -qx 'ExecStart=/bin/probe' $units/web-health.service
+  grep -qx 'Type=oneshot' $units/web-health.service
   touch $out
 ''
