@@ -548,7 +548,7 @@ services.flakelets.services.<name> = {
   output = "flakelets.default";
   settings = { ... };
   inputOverrides = { };
-  autoUpdate = { enable = false; interval = "daily"; };
+  autoUpdate = { enable = false; interval = "daily"; randomizedDelay = "1h"; };
   keepGenerations = 5;
 };
 services.flakelets.eval = { workers = 1; maxMemoryMb = null; };
@@ -566,7 +566,10 @@ Every configured service gets a oneshot `flakelet-<name>.service` that runs
 `flakelet update <name>`. The oneshot restarts whenever the service's entry
 in the configuration changes, and it is ordered after
 `flakelet-reconcile.service` so removals happen before additions. Enabling
-`autoUpdate` adds a timer with the configured interval. In practice updates
+`autoUpdate` adds a timer with the configured interval; a per-host stable
+random delay (`RandomizedDelaySec` with `FixedRandomDelay`) spreads the
+firings across a fleet, so one new revision does not restart the service on
+every machine at the same moment. In practice updates
 are therefore triggered from two directions: a change in the host
 configuration triggers the restart of the oneshot, and a new revision of the
 service flake is picked up by the timer or by an operator running

@@ -61,6 +61,15 @@ let
           default = "daily";
           description = "systemd calendar expression.";
         };
+        randomizedDelay = lib.mkOption {
+          type = lib.types.str;
+          default = "1h";
+          description = ''
+            Spread timer firings across the fleet, so an update does not
+            restart a service on every host at once. Each host keeps a stable
+            offset (FixedRandomDelay), which makes rollouts predictable.
+          '';
+        };
       };
     };
   };

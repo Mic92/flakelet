@@ -86,7 +86,8 @@ in
         timerConfig = {
           OnCalendar = svc.autoUpdate.interval;
           Persistent = true;
-          RandomizedDelaySec = "1h";
+          RandomizedDelaySec = svc.autoUpdate.randomizedDelay;
+          FixedRandomDelay = true;
         };
       }
     ) (lib.filterAttrs (_: svc: svc.autoUpdate.enable) cfg.services);
