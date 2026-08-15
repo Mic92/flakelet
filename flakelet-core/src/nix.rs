@@ -76,11 +76,17 @@ impl Nix {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
+    /// uid/gid evaluation drops to; used to run other untrusted helpers
+    /// (e.g. health checks) with the same privileges.
+    pub fn eval_user(&self) -> Option<(u32, u32)> {
+        self.eval_user
+    }
+
     fn apply_credentials(&self, cmd: &mut Command) -> Result<()> {
         let creds = &self.credentials;
         let mut nix_config = String::new();
         if let Some(netrc) = &creds.netrc_file {
-            nix_config.push_str(&format!("netrc-file = {}\n", netrc.display()));
+            nix_config.push_str(&format!("netrc-file = {}\n", safe_path(netrc)?));
         }
         if let Some(tokens) = &creds.access_tokens_file {
             // Tokens go through the environment, never onto the command line.
@@ -95,10 +101,13 @@ impl Nix {
         if let Some(key) = &creds.ssh_key_file {
             let mut ssh = format!(
                 "ssh -i {} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes",
-                key.display()
+                safe_path(key)?
             );
             if let Some(known_hosts) = &creds.ssh_known_hosts_file {
-                ssh.push_str(&format!(" -o UserKnownHostsFile={}", known_hosts.display()));
+                ssh.push_str(&format!(
+                    " -o UserKnownHostsFile={}",
+                    safe_path(known_hosts)?
+                ));
             }
             cmd.env("GIT_SSH_COMMAND", ssh);
         }
@@ -237,6 +246,17 @@ impl Nix {
     }
 }
 
+/// Credential paths end up in NIX_CONFIG lines and the GIT_SSH_COMMAND shell
+/// string; whitespace or quotes there would inject config or shell words.
+fn safe_path(path: &Path) -> Result<&str> {
+    path.to_str()
+        .filter(|s| {
+            !s.chars()
+                .any(|c| c.is_whitespace() || c == '\'' || c == '"')
+        })
+        .ok_or_else(|| Error::UnsafeCredentialPath(path.into()))
+}
+
 /// Half of MemAvailable, capped at 4 GiB, so eval cannot starve the machine.
 fn default_max_memory_mb() -> u64 {
     let available_kb = fs::read_to_string("/proc/meminfo")
@@ -296,4 +316,23 @@ struct LockedNode {
     #[serde(rename = "narHash")]
     nar_hash: String,
     rev: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_paths_with_shell_metacharacters_are_rejected() {
+        assert_eq!(
+            safe_path(Path::new("/run/secrets/key")).unwrap(),
+            "/run/secrets/key"
+        );
+        for bad in ["/run/a b", "/run/a\nnetrc-file = /x", "/run/a'", "/run/a\""] {
+            assert!(
+                safe_path(Path::new(bad)).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
 }

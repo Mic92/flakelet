@@ -56,6 +56,8 @@ pub enum Error {
     UnsupportedInputOverride { service: String, input: String },
     #[error("flakelet_lib requires adios to be configured (it provides the korora type checker)")]
     LibRequiresAdios,
+    #[error("credential path {0} contains whitespace or quotes")]
+    UnsafeCredentialPath(PathBuf),
     #[error("driver evaluation produced no derivation for '{0}'")]
     NoDerivation(String),
     #[error("nix build of {0} produced no output path")]

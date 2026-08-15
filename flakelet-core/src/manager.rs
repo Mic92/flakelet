@@ -594,8 +594,9 @@ impl Manager {
 
         eprintln!("{name}: activating generation {generation}");
         let previous_units = st.units.clone();
+        let eval_user = self.nix(svc).eval_user();
         let result = systemd::switch(&previous_units, &units)
-            .and_then(|()| health_check_run(name, &units, health_check.as_deref()));
+            .and_then(|()| health_check_run(name, &units, health_check.as_deref(), eval_user));
 
         if let Err(err) = result {
             let reason = err.to_string();
@@ -745,7 +746,12 @@ fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     Ok(())
 }
 
-fn health_check_run(name: &str, units: &Units, script: Option<&Path>) -> Result<()> {
+fn health_check_run(
+    name: &str,
+    units: &Units,
+    script: Option<&Path>,
+    eval_user: Option<(u32, u32)>,
+) -> Result<()> {
     if let Some(unit) = systemd::any_failed(units)? {
         return Err(Error::UnitFailed {
             service: name.into(),
@@ -753,12 +759,16 @@ fn health_check_run(name: &str, units: &Units, script: Option<&Path>) -> Result<
         });
     }
     let Some(script) = script else { return Ok(()) };
-    let status = Command::new(script)
-        .status()
-        .map_err(|source| Error::Spawn {
-            program: script.display().to_string(),
-            source,
-        })?;
+    // The check is service-provided code; a probe needs no root privileges.
+    let mut cmd = Command::new(script);
+    if let Some((uid, gid)) = eval_user {
+        use std::os::unix::process::CommandExt;
+        cmd.uid(uid).gid(gid);
+    }
+    let status = cmd.status().map_err(|source| Error::Spawn {
+        program: script.display().to_string(),
+        source,
+    })?;
     if !status.success() {
         return Err(Error::HealthCheckFailed {
             service: name.into(),
