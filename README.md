@@ -3,8 +3,8 @@
 Run systemd services from Nix flakes and update them independently of the
 host system.
 
-**Status: alpha.** The design and the on-disk formats may still change. It
-has not run production services yet.
+**Status: beta.** Functional and running production services, but the
+interface may still change.
 
 Normally a NixOS host has to be rebuilt to update one of its services.
 flakelet takes the same approach as `virtualisation.oci-containers`, but with
@@ -121,6 +121,15 @@ eval-time constructors in `flakeletLib.contracts`. Known implementations:
 | ------------- | ----------------------------------------------------------------- |
 | `http/v1`     | [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)         |
 | `postgres/v1` | [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)   |
+
+## Real-world examples
+
+- [nixbot](https://github.com/Mic92/nixbot/tree/flakelet) ships a flakelet
+  module in `nix/flakelet.nix` and deploys itself from its own CI via a
+  push effect (`herculesCI/default.nix`).
+- [Mic92/dotfiles](https://github.com/Mic92/dotfiles) runs it on eve:
+  `machines/eve/modules/nixbot.nix` wires the service, nginx routing,
+  postgres provisioning and the CI deploy trigger.
 
 ## Development
 
