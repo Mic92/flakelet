@@ -31,6 +31,22 @@ let
     (t.listOf scalar)
   ];
   strings = t.listOf t.string;
+  # Exports end up in builtins.toJSON; reject unserializable values early.
+  jsonValue = t.typedef' "jsonValue" (
+    v:
+    if v == null || lib.isString v || lib.isBool v || builtins.isInt v || builtins.isFloat v then
+      null
+    else if lib.isDerivation v then
+      null
+    else if lib.isList v then
+      lib.foldl' (acc: x: if acc != null then acc else jsonValue.verify x) null v
+    else if lib.isAttrs v then
+      lib.foldl' (acc: x: if acc != null then acc else jsonValue.verify x) null (
+        lib.attrValues v
+      )
+    else
+      "in exports: value of type '${builtins.typeOf v}' is not JSON-serializable"
+  );
   configSection = t.attrsOf value;
 
   # NixOS-named dependency options -> [Unit] keys.
@@ -85,7 +101,7 @@ let
         t.derivation
         t.string
       ];
-      exports = t.any;
+      exports = t.attrsOf jsonValue;
     }).override
       {
         total = false;
