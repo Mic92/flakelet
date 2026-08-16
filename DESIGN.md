@@ -621,6 +621,79 @@ proxy, and backup adapters such as clan borgbackup for state. The health of
 flakelet itself needs no exports; it is visible through unit state,
 `flakelet status --json` and journal MESSAGE_IDs.
 
+## Contracts and providers
+
+The blessed export schemas generalize into contracts: versioned interfaces
+(`http/v1`, `postgres/v1`) between a service and a provider on the host. A
+contract has two directions. `provides` is what the service offers — the
+exports above. `requires` is a claim a provider must act on: "I need a
+postgres database". It travels in the same exports file:
+
+```nix
+flakeletLib.mkService {
+  services.${name}.serviceConfig = {
+    ExecStart = "${pkg}/bin/serve --db postgresql://${name}@/${name}?host=/run/postgresql";
+    User = name;
+  };
+  exports = {
+    http.web = { host = settings.domain; upstream = "unix:/run/${name}/web.sock"; };
+    requires.postgres = { database = name; role = name; };
+  };
+}
+```
+
+There is no feedback channel from provider to service: contracts are
+deterministic, so the consumer bakes the outcome into its config at
+evaluation time, as the `ExecStart` above does. `postgres/v1` means local
+socket peer authentication — no password exists. Negotiated values
+(allocated ports, generated passwords, remote databases) are out of v1 on
+purpose; the provision/bind handshake of the Open Service Broker lineage is
+the complexity this design avoids.
+
+Providers are bridges on the host, typically NixOS modules, because they own
+host-scope resources: ports 80/443 and certificates for nginx, the superuser
+socket for postgres. A provider may also be a flakelet itself. The rules:
+
+- Level-triggered: a path unit wakes the bridge, which reconciles from the
+  full directory, never from a delta. That absorbs missed events, coalescing
+  and bridge restarts.
+
+  ```ini
+  [Path]
+  PathChanged=/run/flakelet/exports
+  ```
+
+- Provisioning is idempotent and add-only. Nothing is deprovisioned
+  automatically, not even on `flakelet remove`: a rollback must land on a
+  generation whose database still exists. Orphans are listed by the provider
+  and deleted by humans. Stateless renderings (vhosts) do converge: an
+  absent export file tears the route down, which is why `flakelet remove`
+  deletes the export file.
+- One provider per contract per host.
+- Each bridge announces its capability:
+
+  ```json
+  // /etc/flakelet/providers.d/postgres-v1.json
+  { "contract": "postgres/v1" }
+  ```
+
+  flakelet does not parse contract schemas; it only warns in `check` and
+  `status` when a claim has no announcer. Enforcement stays soft: a missing
+  provider surfaces as a failed start, `Restart=` retries until provisioning
+  catches up. First-deploy races resolve the same way, not by an ordering
+  protocol.
+
+Contracts inherit the version 1 trust model: services may claim any domain
+or database name, which is also what lets blue/green instances share one
+database. Bridges still validate exports against the schema, catching
+mistakes rather than attackers. If multi-tenancy ever arrives, provider-side
+grant options are the extension point; flakelet core would not change.
+
+Eval-time shape checking lives in `flakelet.lib`
+(`flakeletLib.contracts.http { … }`), so a typo fails the evaluation instead
+of surfacing as a bridge log line. The reference bridges, nginx and
+postgres, live in a separate providers repository.
+
 ## Users and state ownership
 
 The default answer to "which user does my service run as" is `DynamicUser=`
@@ -681,9 +754,10 @@ pin a service to a known revision until you have reviewed the next one.
 - `flakelet check --override-ref` to pin revisions in pull-request CI.
 - A backup adapter consuming `exports.state`, for clan borgbackup and
   localbackup.
-- Firewall and reverse-proxy integrations consuming `exports.ports` and
-  `exports.http`, as separate projects with a webserver- and
-  firewall-agnostic core.
+- Reference providers: the nginx and postgres bridges, plus firewall
+  integrations consuming `exports.ports`, as separate projects.
+- `flakeletLib.contracts` constructors and the `check`/`status` warning for
+  unannounced claims; `flakelet remove` deleting the export file.
 - Automatic port allocation: a service asks for one tcp port, flakelet
   assigns it from a range and feeds it back through settings.
 - A web service on top of `flakelet-core` for remote deploy triggers.
