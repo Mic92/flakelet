@@ -46,6 +46,8 @@ pub enum Error {
     NoOlderGeneration(String),
     #[error("settings of '{service}' reference dangling store path {path}")]
     DanglingStorePath { service: String, path: String },
+    #[error("prebuilt artifact {0} does not exist")]
+    MissingArtifact(PathBuf),
     #[error("{path} has schema version {found}, this flakelet only supports up to {supported}")]
     SchemaTooNew {
         path: PathBuf,

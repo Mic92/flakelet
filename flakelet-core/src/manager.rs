@@ -324,11 +324,18 @@ impl Manager {
         if self.config.services.contains_key(name) {
             return Err(Error::DeclaredService(name.into()));
         }
+        let fresh = !self.service_dir(name).exists();
         {
             let _locks = self.locks(name, !opts.no_wait, "deploy")?;
             write_json_atomic(&self.manual_config_path(name), svc)?;
         }
-        self.update(name, opts)
+        let result = self.update(name, opts);
+        // Do not keep the registration of a failed first deploy.
+        let gens = Generations::new(&self.config.gcroot_dir, name);
+        if result.is_err() && fresh && gens.list().map_or(true, |g| g.is_empty()) {
+            let _ = fs::remove_dir_all(self.service_dir(name));
+        }
+        result
     }
 
     /// Stop a service and delete its generations and state.
@@ -489,10 +496,7 @@ impl Manager {
         let mut artifact = if let Some(prebuilt) = &svc.prebuilt {
             eprintln!("{name}: using prebuilt artifact {}", prebuilt.display());
             if !prebuilt.exists() {
-                return Err(Error::DanglingStorePath {
-                    service: name.into(),
-                    path: prebuilt.display().to_string(),
-                });
+                return Err(Error::MissingArtifact(prebuilt.clone()));
             }
             let meta = ArtifactMeta::load(prebuilt);
             Artifact {
