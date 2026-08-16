@@ -689,12 +689,28 @@ database. Bridges still validate exports against the schema, catching
 mistakes rather than attackers. If multi-tenancy ever arrives, provider-side
 grant options are the extension point; flakelet core would not change.
 
-Each contract lives in its own repository, owning the schema, an eval-time
-constructor library and the reference bridge: `flakelet-http` ships the
-nginx bridge, `flakelet-postgres` the provisioner. flakelet itself defines
-no contract; core only matches claim keys against announcements. A service
-wanting shape checking takes the contract repo as a flake input, which also
-versions the schema independently of both flakelet and the service.
+Where a contract lives follows one criterion: whether services reach it
+through the injected `flakeletLib` (service flakes are input-free, so
+anything they need must be injectable) and whether core interprets it.
+`ports` is core-enforced and cannot move. Pure descriptions that are
+near-universal and multi-implementation — `http`, later `metrics` and
+`state` — are blessed here: JSON Schema in `contracts/`, constructor in
+`flakeletLib.contracts`. Backing-service contracts such as `postgres` live
+in their implementation's repository (`flakelet-postgres`), because their
+hard parts — add-only provisioning, orphans, rollback interplay — are
+inseparable from the provisioner, and the family is open-ended (redis,
+s3, …) while claims are plain attrsets needing no constructor. The JSON
+shape is the interface in all cases; a bridge in any language validates
+against the schema file, never against Nix code. Schema changes require a
+working implementation and a real consumer; recurring `extra.<impl>` keys
+are the promotion signal for new typed fields.
+
+Bridges are guests in host services, never owners: they extend only through
+append-safe merge points (an nginx include directive, SQL-level
+provisioning) and must compose with an existing `services.nginx` or
+`services.postgresql` configuration. Implementations live in their own
+repositories, named for what they wrap (`flakelet-nginx`,
+`flakelet-postgres`); the known ones are listed in the README.
 
 ## Users and state ownership
 
@@ -756,9 +772,8 @@ pin a service to a known revision until you have reviewed the next one.
 - `flakelet check --override-ref` to pin revisions in pull-request CI.
 - A backup adapter consuming `exports.state`, for clan borgbackup and
   localbackup.
-- Contract repositories: `flakelet-http` (nginx bridge) and
-  `flakelet-postgres` (provisioner), plus firewall integrations consuming
-  `exports.ports`.
+- Contract implementations: `flakelet-nginx` and `flakelet-postgres`, plus
+  firewall integrations consuming `exports.ports`.
 - Automatic port allocation: a service asks for one tcp port, flakelet
   assigns it from a range and feeds it back through settings.
 - A web service on top of `flakelet-core` for remote deploy triggers.

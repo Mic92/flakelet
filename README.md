@@ -112,6 +112,16 @@ of `nixosConfigurations.eve` in the current flake and builds all of its
 service artifacts. Run it in CI to catch broken services before they reach
 the machine and to fill the binary cache.
 
+## Contracts and providers
+
+Blessed contracts live in [contracts/](contracts/) as JSON Schema, with
+eval-time constructors in `flakeletLib.contracts`. Known implementations:
+
+| Contract      | Implementation                                                    |
+| ------------- | ----------------------------------------------------------------- |
+| `http/v1`     | [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)         |
+| `postgres/v1` | [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)   |
+
 ## Development
 
 ```console
