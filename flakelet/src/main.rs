@@ -349,7 +349,16 @@ fn run(cli: &Cli) -> Result<bool> {
             mgr.unlock_service(name)?;
             println!("{name}: unpinned");
         }
-        Cmd::Gc { keep } => mgr.gc(*keep)?,
+        Cmd::Gc { keep } => {
+            let pruned = mgr.gc(*keep)?;
+            if pruned.is_empty() {
+                println!("nothing to prune");
+            }
+            for (name, gens) in pruned {
+                let gens: Vec<String> = gens.iter().map(u32::to_string).collect();
+                println!("{name}: pruned generation(s) {}", gens.join(", "));
+            }
+        }
     }
     Ok(true)
 }
@@ -418,6 +427,12 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
             s.flake,
             pin
         );
+        if let Some(err) = s.held.as_deref().or(s.last_error.as_deref()) {
+            let mut lines = err.lines().map(str::trim);
+            let line = lines.clone().rfind(|l| l.contains("error:"));
+            let line = line.or_else(|| lines.next()).unwrap_or(err);
+            println!("\tlast error: {line}");
+        }
         for claim in &s.missing_providers {
             eprintln!("{}: warning: no provider announces '{claim}'", s.name);
         }
