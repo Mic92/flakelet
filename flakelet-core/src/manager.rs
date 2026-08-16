@@ -545,7 +545,8 @@ impl Manager {
             Err(err) => {
                 let msg = err.to_string();
                 st.last_error = Some(msg.clone());
-                if opts.offline_fallback && err.is_network_error() {
+                // Nothing to fall back to on a first deploy.
+                if opts.offline_fallback && err.is_network_error() && st.generation.is_some() {
                     st.degraded = true;
                     st.save(&state_path)?;
                     return Ok(UpdateOutcome::Degraded { reason: msg });
@@ -809,7 +810,8 @@ const HOST_UNIT_DIRS: &[&str] = &[
 /// shadowing of units the host already owns.
 fn validate_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
-    let ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+    let ok = name.len() <= 128
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
     if ok {
         Ok(())
@@ -983,7 +985,16 @@ mod tests {
         for ok in ["web", "my-app", "a.b_c2"] {
             assert!(validate_name(ok).is_ok(), "{ok}");
         }
-        for bad in ["", "../evil", "a b", "a/b", ".hidden", "-x", "a\nb"] {
+        for bad in [
+            "",
+            "../evil",
+            "a b",
+            "a/b",
+            ".hidden",
+            "-x",
+            "a\nb",
+            &"a".repeat(129),
+        ] {
             assert!(validate_name(bad).is_err(), "{bad:?}");
         }
     }

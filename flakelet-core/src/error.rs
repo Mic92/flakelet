@@ -34,7 +34,7 @@ pub enum Error {
     LockHeld { path: PathBuf, holder: String },
     #[error("service '{0}' is not configured")]
     UnknownService(String),
-    #[error("no services with a flake reference to check")]
+    #[error("no services with a flake reference")]
     NothingToCheck,
     #[error("invalid service name '{0}': use letters, digits, '-', '_' or '.'")]
     InvalidServiceName(String),
