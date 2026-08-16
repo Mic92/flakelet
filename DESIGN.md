@@ -650,13 +650,13 @@ socket peer authentication — no password exists. Negotiated values
 purpose; the provision/bind handshake of the Open Service Broker lineage is
 the complexity this design avoids.
 
-Providers are bridges on the host, typically NixOS modules, because they own
+Providers run on the host, typically as NixOS modules, because they own
 host-scope resources: ports 80/443 and certificates for nginx, the superuser
 socket for postgres. A provider may also be a flakelet itself. The rules:
 
-- Level-triggered: a path unit wakes the bridge, which reconciles from the
+- Level-triggered: a path unit wakes the provider, which reconciles from the
   full directory, never from a delta. That absorbs missed events, coalescing
-  and bridge restarts.
+  and provider restarts.
 
   ```ini
   [Path]
@@ -670,7 +670,7 @@ socket for postgres. A provider may also be a flakelet itself. The rules:
   absent export file tears the route down, which is why `flakelet remove`
   deletes the export file.
 - One provider per contract per host.
-- Each bridge announces its capability:
+- Each provider announces its capability:
 
   ```json
   // /etc/flakelet/providers.d/postgres-v1.json
@@ -685,7 +685,7 @@ socket for postgres. A provider may also be a flakelet itself. The rules:
 
 Contracts inherit the version 1 trust model: services may claim any domain
 or database name, which is also what lets blue/green instances share one
-database. Bridges still validate exports against the schema, catching
+database. Providers still validate exports against the schema, catching
 mistakes rather than attackers. If multi-tenancy ever arrives, provider-side
 grant options are the extension point; flakelet core would not change.
 
@@ -698,14 +698,14 @@ near-universal and multi-implementation — `http`, later `metrics` and
 `flakeletLib.contracts`. Backing-service contracts such as `postgres` live
 in their implementation's repository (`flakelet-postgres`), because their
 hard parts — add-only provisioning, orphans, rollback interplay — are
-inseparable from the provisioner, and the family is open-ended (redis,
+inseparable from the provider, and the family is open-ended (redis,
 s3, …) while claims are plain attrsets needing no constructor. The JSON
-shape is the interface in all cases; a bridge in any language validates
+shape is the interface in all cases; a provider in any language validates
 against the schema file, never against Nix code. Schema changes require a
 working implementation and a real consumer; recurring `extra.<impl>` keys
 are the promotion signal for new typed fields.
 
-Bridges are guests in host services, never owners: they extend only through
+Providers are guests in host services, never owners: they extend only through
 append-safe merge points (an nginx include directive, SQL-level
 provisioning) and must compose with an existing `services.nginx` or
 `services.postgresql` configuration. Implementations live in their own
