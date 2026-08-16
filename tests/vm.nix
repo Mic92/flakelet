@@ -46,7 +46,7 @@ in
   name = "flakelet";
 
   nodes.machine =
-    { config, ... }:
+    { config, options, ... }:
     {
       imports = [ flakeletModule ];
 
@@ -72,9 +72,6 @@ in
 
       virtualisation = {
         writableStore = true;
-        # virtiofs instead of 9p for the host store: evaluating nixpkgs at
-        # runtime is far faster and nothing needs to be copied into an image.
-        virtiofs.enable = true;
         additionalPaths = [
           config.services.flakelets.nixpkgs
           testService
@@ -87,7 +84,10 @@ in
         ];
         memorySize = 4096;
         cores = 4;
-      };
+      }
+      # virtiofs instead of 9p for the host store is far faster but not yet
+      # in upstream nixpkgs.
+      // lib.optionalAttrs (options.virtualisation ? virtiofs) { virtiofs.enable = true; };
     };
 
   testScript = ''
