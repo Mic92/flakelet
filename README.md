@@ -124,9 +124,10 @@ eval-time constructors in `flakeletLib.contracts`. Known implementations:
 
 ## Real-world examples
 
-- [nixbot](https://github.com/Mic92/nixbot/tree/flakelet) ships a flakelet
-  module in `nix/flakelet.nix` and deploys itself from its own CI via a
-  push effect (`herculesCI/default.nix`).
+- [nixbot](https://github.com/Mic92/nixbot) ships a flakelet module in
+  [`nix/flakelet.nix`](https://github.com/Mic92/nixbot/blob/main/nix/flakelet.nix)
+  and deploys itself from its own CI via a push effect
+  ([`herculesCI/default.nix`](https://github.com/Mic92/nixbot/blob/main/herculesCI/default.nix)).
 - [Mic92/dotfiles](https://github.com/Mic92/dotfiles) runs it on eve:
   `machines/eve/modules/nixbot.nix` wires the service, nginx routing,
   postgres provisioning and the CI deploy trigger.
