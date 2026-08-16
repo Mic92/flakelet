@@ -119,10 +119,8 @@ impl Nix {
         let out = self.run("nix", &a)?;
         let meta: FlakeMetadata =
             serde_json::from_str(&out).map_err(Error::json("parse flake metadata"))?;
-        let sep = if meta.url.contains('?') { '&' } else { '?' };
-        let nar_hash = meta.locked.nar_hash.replace('+', "%2B").replace('=', "%3D");
         Ok(LockedFlake {
-            url: format!("{}{sep}narHash={nar_hash}", meta.url),
+            url: with_nar_hash(&meta.url, &meta.locked.nar_hash),
             rev: meta.locked.rev.unwrap_or(meta.locked.nar_hash),
         })
     }
@@ -240,6 +238,15 @@ impl Nix {
     }
 }
 
+fn with_nar_hash(url: &str, nar_hash: &str) -> String {
+    if url.contains("narHash=") {
+        return url.into();
+    }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let nar_hash = nar_hash.replace('+', "%2B").replace('=', "%3D");
+    format!("{url}{sep}narHash={nar_hash}")
+}
+
 /// Credential paths end up in NIX_CONFIG lines and the GIT_SSH_COMMAND shell
 /// string; whitespace or quotes there would inject config or shell words.
 fn safe_path(path: &Path) -> Result<&str> {
@@ -328,5 +335,21 @@ mod tests {
                 "{bad} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn nar_hash_is_not_appended_twice() {
+        assert_eq!(
+            with_nar_hash("github:a/b/rev", "sha256-x+y="),
+            "github:a/b/rev?narHash=sha256-x%2By%3D"
+        );
+        assert_eq!(
+            with_nar_hash("github:a/b/rev?dir=sub", "sha256-x"),
+            "github:a/b/rev?dir=sub&narHash=sha256-x"
+        );
+        assert_eq!(
+            with_nar_hash("github:a/b/rev?narHash=sha256-x", "sha256-x"),
+            "github:a/b/rev?narHash=sha256-x"
+        );
     }
 }
