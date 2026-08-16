@@ -56,6 +56,8 @@ pub struct CheckResult {
     pub drv_path: String,
     /// Output path when the artifact was also built.
     pub out: Option<PathBuf>,
+    /// Contract claims no provider on this host announces.
+    pub missing_providers: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +73,7 @@ pub struct ServiceStatus {
     pub held: Option<String>,
     pub last_error: Option<String>,
     pub updating: bool,
+    pub missing_providers: Vec<String>,
 }
 
 pub struct Manager {
@@ -179,6 +182,10 @@ impl Manager {
                     held: st.hold.map(|h| h.reason),
                     last_error: st.last_error,
                     updating,
+                    missing_providers: exports::unannounced_claims(
+                        &st.exports,
+                        &self.config.providers_dir,
+                    ),
                 })
             })
             .collect()
@@ -258,10 +265,17 @@ impl Manager {
             } else {
                 None
             };
+            let missing_providers = out
+                .as_ref()
+                .and_then(|o| fs::read_to_string(o.join("exports.json")).ok())
+                .and_then(|data| serde_json::from_str(&data).ok())
+                .map(|exports| exports::unannounced_claims(&exports, &self.config.providers_dir))
+                .unwrap_or_default();
             results.push(CheckResult {
                 name: job.attr,
                 drv_path,
                 out,
+                missing_providers,
             });
         }
         Ok(results)

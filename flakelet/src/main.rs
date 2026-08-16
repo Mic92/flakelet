@@ -305,6 +305,9 @@ fn run(cli: &Cli) -> Result<bool> {
                     Some(out) => println!("{}: built {}", result.name, out.display()),
                     None => println!("{}: evaluated {}", result.name, result.drv_path),
                 }
+                for claim in &result.missing_providers {
+                    eprintln!("{}: warning: no provider announces '{claim}'", result.name);
+                }
             }
         }
         Cmd::Driver { names, opts } => {
@@ -390,6 +393,9 @@ fn print_status(mgr: &Manager, json: bool) -> Result<()> {
             s.generation.map_or("-".into(), |g| g.to_string()),
             s.flake
         );
+        for claim in &s.missing_providers {
+            eprintln!("{}: warning: no provider announces '{claim}'", s.name);
+        }
     }
     Ok(())
 }

@@ -98,6 +98,7 @@ let
     in
     if err == null then v else throw "flakeletLib.mkService: ${err}";
 
+
   # mkValueStringDefault aborts on attrsets, so derivations (e.g. a package
   # as ExecStart) are stringified explicitly.
   toValue = v: if lib.isDerivation v then toString v else lib.generators.mkValueStringDefault { } v;

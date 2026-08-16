@@ -28,6 +28,31 @@ pub fn unpublish(runtime_dir: &Path, name: &str) -> Result<()> {
     }
 }
 
+/// Contract claims (`exports.requires.<contract>`) without an announcement
+/// in `providers_dir`. A missing dir means unknown host, not "no providers".
+pub fn unannounced_claims(exports: &Value, providers_dir: &Path) -> Vec<String> {
+    let Some(requires) = exports.get("requires").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(providers_dir) else {
+        return Vec::new();
+    };
+    let announced: Vec<String> = entries
+        .filter_map(|e| fs::read_to_string(e.ok()?.path()).ok())
+        .filter_map(|data| {
+            let v: Value = serde_json::from_str(&data).ok()?;
+            // "postgres/v1" announces the "postgres" claim key.
+            let contract = v.get("contract")?.as_str()?;
+            Some(contract.split('/').next().unwrap_or(contract).to_string())
+        })
+        .collect();
+    requires
+        .keys()
+        .filter(|claim| !announced.iter().any(|a| a == *claim))
+        .cloned()
+        .collect()
+}
+
 /// A tcp/udp port range claimed via `exports.ports.<name>`.
 #[derive(Debug, PartialEq)]
 struct PortClaim {
@@ -88,6 +113,26 @@ pub fn check_port_conflicts(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claims_without_announced_provider_are_reported() {
+        let exports = json!({ "requires": { "postgres": { "database": "web" },
+                                            "redis": {} } });
+        let dir = tempfile::tempdir().unwrap();
+        // Unknown host: no providers dir, no warnings.
+        assert!(unannounced_claims(&exports, &dir.path().join("absent")).is_empty());
+        assert_eq!(
+            unannounced_claims(&exports, dir.path()),
+            vec!["postgres", "redis"]
+        );
+        fs::write(
+            dir.path().join("postgres-v1.json"),
+            r#"{ "contract": "postgres/v1" }"#,
+        )
+        .unwrap();
+        assert_eq!(unannounced_claims(&exports, dir.path()), vec!["redis"]);
+        assert!(unannounced_claims(&json!({}), dir.path()).is_empty());
+    }
 
     #[test]
     fn overlapping_ports_are_rejected() {

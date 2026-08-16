@@ -19,6 +19,8 @@ pub struct Config {
     pub gcroot_dir: PathBuf,
     /// Volatile runtime data (published exports), cleared on reboot.
     pub runtime_dir: PathBuf,
+    /// Provider capability announcements (`<contract>.json` files).
+    pub providers_dir: PathBuf,
     /// Store path of the host's nixpkgs source, imported once by the driver.
     pub nixpkgs: Option<PathBuf>,
     /// Store path of the adios library source, injected into service modules.
@@ -42,6 +44,7 @@ impl Default for Config {
             state_dir: "/var/lib/flakelet".into(),
             gcroot_dir: "/nix/var/nix/gcroots/flakelet".into(),
             runtime_dir: "/run/flakelet".into(),
+            providers_dir: "/etc/flakelet/providers.d".into(),
             nixpkgs: None,
             adios: None,
             flakelet_lib: None,

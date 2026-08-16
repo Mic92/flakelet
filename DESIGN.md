@@ -689,10 +689,12 @@ database. Bridges still validate exports against the schema, catching
 mistakes rather than attackers. If multi-tenancy ever arrives, provider-side
 grant options are the extension point; flakelet core would not change.
 
-Eval-time shape checking lives in `flakelet.lib`
-(`flakeletLib.contracts.http { … }`), so a typo fails the evaluation instead
-of surfacing as a bridge log line. The reference bridges, nginx and
-postgres, live in a separate providers repository.
+Each contract lives in its own repository, owning the schema, an eval-time
+constructor library and the reference bridge: `flakelet-http` ships the
+nginx bridge, `flakelet-postgres` the provisioner. flakelet itself defines
+no contract; core only matches claim keys against announcements. A service
+wanting shape checking takes the contract repo as a flake input, which also
+versions the schema independently of both flakelet and the service.
 
 ## Users and state ownership
 
@@ -754,10 +756,9 @@ pin a service to a known revision until you have reviewed the next one.
 - `flakelet check --override-ref` to pin revisions in pull-request CI.
 - A backup adapter consuming `exports.state`, for clan borgbackup and
   localbackup.
-- Reference providers: the nginx and postgres bridges, plus firewall
-  integrations consuming `exports.ports`, as separate projects.
-- `flakeletLib.contracts` constructors and the `check`/`status` warning for
-  unannounced claims; `flakelet remove` deleting the export file.
+- Contract repositories: `flakelet-http` (nginx bridge) and
+  `flakelet-postgres` (provisioner), plus firewall integrations consuming
+  `exports.ports`.
 - Automatic port allocation: a service asks for one tcp port, flakelet
   assigns it from a range and feeds it back through settings.
 - A web service on top of `flakelet-core` for remote deploy triggers.
