@@ -19,9 +19,17 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
     // Stop vanished units first: a renamed unit must release its ports and
     // sockets before its successor starts.
     for (unit, _) in old.iter().filter(|(u, _)| !new.contains_key(*u)) {
-        systemctl(&["disable", "--runtime", "--now", unit])?;
-        fs::remove_file(Path::new(RUNTIME_UNIT_DIR).join(unit))
-            .map_err(Error::io(format!("unlink unit {unit}")))?;
+        // Stop before disable: disable unlinks the unit file.
+        if is_loadable(unit)? {
+            systemctl(&["stop", unit])?;
+            systemctl(&["disable", "--runtime", unit])?;
+        }
+        match fs::remove_file(Path::new(RUNTIME_UNIT_DIR).join(unit)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(Error::io(format!("unlink unit {unit}"))(e))
+            }
+            _ => {}
+        }
     }
     for (unit, path) in new {
         link(unit, path)?;
@@ -61,6 +69,17 @@ pub fn relink(units: &Units) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_loadable(unit: &str) -> Result<bool> {
+    let out = Command::new("systemctl")
+        .args(["show", "--property=LoadState", "--value", unit])
+        .output()
+        .map_err(|source| Error::Spawn {
+            program: "systemctl".into(),
+            source,
+        })?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim() != "not-found")
 }
 
 fn has_install(unit: &str, path: &PathBuf) -> Result<bool> {

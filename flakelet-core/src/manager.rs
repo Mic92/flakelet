@@ -332,6 +332,9 @@ impl Manager {
 
     /// Stop a service and delete its generations and state.
     pub fn remove(&self, name: &str) -> Result<()> {
+        if !self.service_dir(name).exists() {
+            return Err(Error::NeverDeployed(name.into()));
+        }
         let _locks = self.locks(name, true, "remove")?;
         let st = State::load(&self.state_path(name))?;
         systemd::remove(&st.units)?;
