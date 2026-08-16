@@ -49,7 +49,148 @@ Options:
   --no-wait             Fail instead of waiting for another flakelet operation
   --offline-fallback    Keep the current units when evaluation fails due to network errors
   --no-refresh          Do not bypass flake caches when resolving refs (offline use)
+
+Examples:
+  flakelet update                     Update all services, remove vanished ones
+  flakelet deploy web --flake github:me/web
+  flakelet status --json
+  flakelet check --machine web01 --flake .
+
+Run 'flakelet <command> --help' for command-specific examples.
 ";
+
+fn command_help(command: &str) -> Option<&'static str> {
+    Some(match command {
+        "update" => "\
+Usage: flakelet update [<name>...] [--force] [--no-wait] [--offline-fallback] [--no-refresh]
+
+Evaluate, build and activate services. Without names all configured
+services are updated and vanished declarative services are removed.
+
+Examples:
+  flakelet update
+  flakelet update web api
+  flakelet update web --force            Retry a held service
+  flakelet update --offline-fallback     Keep running units when the network is down
+",
+        "boot" => "\
+Usage: flakelet boot
+
+Re-link the current generations at boot, without evaluation.
+Run by the flakelet-boot service; rarely needed manually.
+",
+        "deploy" => "\
+Usage: flakelet deploy <name> --flake <ref> [--settings <file>] [--output <attr>]
+
+Register and deploy a service outside the host configuration.
+
+Examples:
+  flakelet deploy web --flake github:me/web
+  flakelet deploy web --flake github:me/web/v1.2 --settings prod.json
+  flakelet deploy web --flake . --output flakelet.web
+",
+        "activate" => "\
+Usage: flakelet activate <name> <store path>
+
+Register and start a prebuilt service artifact, no evaluation. Build it
+first with 'flakelet build' and copy the closure to the target host.
+
+Example:
+  flakelet activate web /nix/store/...-flakelet-web
+",
+        "remove" => "\
+Usage: flakelet remove <name>
+
+Stop a service and delete its state and generations.
+
+Example:
+  flakelet remove web
+",
+        "reconcile" => "\
+Usage: flakelet reconcile
+
+Remove declarative services that vanished from the host configuration.
+Also runs as part of 'flakelet update' without names.
+",
+        "check" => "\
+Usage: flakelet check [<name>...] [--build] [--gc-roots-dir <dir>] [--machine <name> [--flake <ref>]]
+
+Resolve and evaluate configured services without touching state (CI).
+
+Examples:
+  flakelet check
+  flakelet check web --build
+  flakelet check --machine web01 --flake github:me/infra
+",
+        "build" => "\
+Usage: flakelet build <name>... [--out-link <dir>] [--machine <name> [--flake <ref>]]
+
+Like check, but build the artifacts with out-links in <dir> (default: .).
+
+Examples:
+  flakelet build web
+  flakelet build web --out-link /tmp/artifacts --machine web01
+",
+        "driver" => "\
+Usage: flakelet driver [<name>...] [--machine <name> [--flake <ref>]]
+
+Print the rendered driver expression, the Nix code flakelet evaluates.
+
+Example:
+  flakelet driver web
+",
+        "status" => "\
+Usage: flakelet status [<name>...] [--json]
+
+Show service status. Names filter the output.
+
+Examples:
+  flakelet status
+  flakelet status web --json
+",
+        "diff" => "\
+Usage: flakelet diff <name> [--no-refresh]
+
+Closure diff between the running generation and a fresh evaluation.
+
+Example:
+  flakelet diff web
+",
+        "rollback" => "\
+Usage: flakelet rollback <name>
+
+Switch back to the previous generation. The next update rolls forward
+again; use 'flakelet lock' to stay on the current revision.
+
+Example:
+  flakelet rollback web
+",
+        "lock" => "\
+Usage: flakelet lock <name>
+
+Pin a service to the currently resolved flake revision. Updates keep
+deploying the pinned revision until 'flakelet unlock'.
+
+Example:
+  flakelet lock web
+",
+        "unlock" => "\
+Usage: flakelet unlock <name>
+
+Remove the pin set by 'flakelet lock'.
+",
+        "gc" => "\
+Usage: flakelet gc [--keep <n>]
+
+Prune old generations. --keep overrides the per-service setting.
+
+Examples:
+  flakelet gc
+  flakelet gc --keep 1
+",
+        _ => return None,
+    })
+}
 
 enum Cmd {
     Update {
@@ -115,10 +256,7 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = match parse_args() {
         Ok(Some(cli)) => cli,
-        Ok(None) => {
-            print!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
+        Ok(None) => return ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err}\ntry 'flakelet --help'");
             return ExitCode::FAILURE;
@@ -134,7 +272,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Ok(None) means: help requested.
+/// Ok(None) means: help was requested and printed.
 fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut parser = lexopt::Parser::from_env();
     let mut config: Option<PathBuf> = None;
@@ -143,7 +281,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let command = loop {
         match parser.next()? {
             Some(Long("config")) => config = Some(parser.value()?.into()),
-            Some(Long("help")) | Some(Short('h')) => return Ok(None),
+            Some(Long("help")) | Some(Short('h')) => {
+                print!("{USAGE}");
+                return Ok(None);
+            }
             Some(Value(v)) => break v.string()?,
             Some(arg) => return Err(arg.unexpected()),
             None => return Err("missing command".into()),
@@ -161,6 +302,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut machine = None;
     while let Some(arg) = parser.next()? {
         match arg {
+            Long("help") | Short('h') => {
+                print!("{}", command_help(&command).unwrap_or(USAGE));
+                return Ok(None);
+            }
             Long("force") => opts.force = true,
             Long("no-wait") => opts.no_wait = true,
             Long("offline-fallback") => opts.offline_fallback = true,
@@ -174,7 +319,6 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("out-link") => check.out_links = Some(PathBuf::from(parser.value()?)),
             Long("machine") => machine = Some(parser.value()?.string()?),
             Long("keep") => keep = Some(parser.value()?.parse()?),
-            Long("help") | Short('h') => return Ok(None),
             Value(v) => names.push(v.string()?),
             _ => return Err(arg.unexpected()),
         }
