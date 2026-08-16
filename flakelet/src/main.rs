@@ -29,7 +29,8 @@ Commands:
                         Like check, but build the artifacts with out-links in <dir> (default: .)
   driver [<name>...] [--machine <name> [--flake <ref>]]
                         Print the rendered driver expression
-  status [--json]       Show service status
+  status [<name>...] [--json]
+                        Show service status
   diff <name>           Closure diff between the running generation and a fresh evaluation
   rollback <name>       Switch back to the previous generation
   lock <name>           Pin a service to the currently resolved flake revision
@@ -75,6 +76,7 @@ enum Cmd {
     },
     Status {
         json: bool,
+        names: Vec<String>,
     },
     Diff {
         name: String,
@@ -106,6 +108,7 @@ enum ConfigSource {
 
 struct Cli {
     config: ConfigSource,
+    config_explicit: bool,
     command: Cmd,
 }
 
@@ -117,7 +120,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(err) => {
-            eprintln!("error: {err}\n\n{USAGE}");
+            eprintln!("error: {err}\ntry 'flakelet --help'");
             return ExitCode::FAILURE;
         }
     };
@@ -225,7 +228,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Cmd::Check { names, check }
         }
         "driver" => Cmd::Driver { names, opts },
-        "status" => Cmd::Status { json },
+        "status" => Cmd::Status { json, names },
         "diff" => Cmd::Diff {
             name: one_name(&names)?,
             refresh: !opts.no_refresh,
@@ -242,6 +245,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         "gc" => Cmd::Gc { keep },
         other => return Err(format!("unknown command '{other}'").into()),
     };
+    let config_explicit = config.is_some();
     let config = match (machine, config) {
         (None, config) => {
             ConfigSource::File(config.unwrap_or_else(|| "/etc/flakelet/config.json".into()))
@@ -255,12 +259,23 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         }
         (Some(_), None) => return Err("--machine is only supported for check and driver".into()),
     };
-    Ok(Some(Cli { config, command }))
+    Ok(Some(Cli {
+        config,
+        config_explicit,
+        command,
+    }))
 }
 
 fn run(cli: &Cli) -> Result<bool> {
     let config = match &cli.config {
-        ConfigSource::File(path) => path.clone(),
+        ConfigSource::File(path) => {
+            if cli.config_explicit && !path.exists() {
+                return Err(Error::io(format!("cannot read config {}", path.display()))(
+                    std::io::ErrorKind::NotFound.into(),
+                ));
+            }
+            path.clone()
+        }
         // Off-machine: build the machine's rendered config.json from its flake.
         ConfigSource::Machine { flake, name } => Nix::new(&flakelet_core::Config::default(), None)
             .build_attr(&format!(
@@ -313,7 +328,7 @@ fn run(cli: &Cli) -> Result<bool> {
         Cmd::Driver { names, opts } => {
             print!("{}", mgr.render_driver(names, !opts.no_refresh)?);
         }
-        Cmd::Status { json } => print_status(&mgr, *json)?,
+        Cmd::Status { json, names } => print_status(&mgr, *json, names)?,
         Cmd::Diff { name, refresh } => {
             let diff = mgr.diff(name, *refresh)?;
             if diff.is_empty() {
@@ -365,8 +380,16 @@ fn update_all(mgr: &Manager, names: &[String], opts: UpdateOpts) -> bool {
     ok
 }
 
-fn print_status(mgr: &Manager, json: bool) -> Result<()> {
-    let status = mgr.status()?;
+fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
+    let mut status = mgr.status()?;
+    if !names.is_empty() {
+        for name in names {
+            if !status.iter().any(|s| &s.name == name) {
+                return Err(Error::UnknownService(name.clone()));
+            }
+        }
+        status.retain(|s| names.contains(&s.name));
+    }
     if json {
         println!(
             "{}",
@@ -386,12 +409,14 @@ fn print_status(mgr: &Manager, json: bool) -> Result<()> {
         } else {
             "not deployed"
         };
+        let pin = if s.pin.is_some() { "\t(pinned)" } else { "" };
         println!(
-            "{}\t{}\tgen {}\t{}",
+            "{}\t{}\tgen {}\t{}{}",
             s.name,
             state,
             s.generation.map_or("-".into(), |g| g.to_string()),
-            s.flake
+            s.flake,
+            pin
         );
         for claim in &s.missing_providers {
             eprintln!("{}: warning: no provider announces '{claim}'", s.name);
