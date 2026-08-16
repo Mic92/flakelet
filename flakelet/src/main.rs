@@ -447,7 +447,7 @@ fn run(cli: &Cli) -> Result<bool> {
         Cmd::Deploy { name, svc, opts } => {
             let outcome = mgr.deploy(name, svc, *opts)?;
             println!("{name}: {}", describe(&outcome));
-            return Ok(!matches!(outcome, UpdateOutcome::RolledBack { .. }));
+            return Ok(success(&outcome));
         }
         Cmd::Remove { name } => {
             mgr.remove(name)?;
@@ -522,7 +522,7 @@ fn update_all(mgr: &Manager, names: &[String], opts: UpdateOpts) -> bool {
         match mgr.update(name, opts) {
             Ok(outcome) => {
                 println!("{name}: {}", describe(&outcome));
-                ok &= !matches!(outcome, UpdateOutcome::RolledBack { .. });
+                ok &= success(&outcome);
             }
             Err(err) => {
                 eprintln!("{name}: error: {err}");
@@ -582,6 +582,13 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn success(outcome: &UpdateOutcome) -> bool {
+    !matches!(
+        outcome,
+        UpdateOutcome::RolledBack { .. } | UpdateOutcome::Held { .. }
+    )
 }
 
 fn describe(outcome: &UpdateOutcome) -> String {

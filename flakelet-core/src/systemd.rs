@@ -23,6 +23,9 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
         if is_loadable(unit)? {
             systemctl(&["stop", unit])?;
             systemctl(&["disable", "--runtime", unit])?;
+            let _ = Command::new("systemctl")
+                .args(["reset-failed", unit])
+                .output();
         }
         match fs::remove_file(Path::new(RUNTIME_UNIT_DIR).join(unit)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
