@@ -320,6 +320,7 @@ impl Manager {
         svc: &ServiceConfig,
         opts: UpdateOpts,
     ) -> Result<UpdateOutcome> {
+        validate_name(name)?;
         if self.config.services.contains_key(name) {
             return Err(Error::DeclaredService(name.into()));
         }
@@ -332,6 +333,7 @@ impl Manager {
 
     /// Stop a service and delete its generations and state.
     pub fn remove(&self, name: &str) -> Result<()> {
+        validate_name(name)?;
         if !self.service_dir(name).exists() {
             return Err(Error::NeverDeployed(name.into()));
         }
@@ -393,14 +395,19 @@ impl Manager {
         st.save(&self.state_path(name))
     }
 
-    pub fn gc(&self, keep_override: Option<u32>) -> Result<()> {
+    pub fn gc(&self, keep_override: Option<u32>) -> Result<Vec<(String, Vec<u32>)>> {
         let _global = lock::acquire(&self.global_lock(), true, true, "gc")?;
+        let mut pruned = Vec::new();
         for (name, (svc, _)) in self.services()? {
             let st = State::load(&self.state_path(&name))?;
             let keep = keep_override.unwrap_or(svc.keep_generations);
-            Generations::new(&self.config.gcroot_dir, &name).prune(keep, st.generation)?;
+            let gens =
+                Generations::new(&self.config.gcroot_dir, &name).prune(keep, st.generation)?;
+            if !gens.is_empty() {
+                pruned.push((name, gens));
+            }
         }
-        Ok(())
+        Ok(pruned)
     }
 
     pub fn rollback(&self, name: &str) -> Result<u32> {
@@ -707,6 +714,17 @@ const HOST_UNIT_DIRS: &[&str] = &[
 /// Enforce the service contract on unit names before anything is activated:
 /// names start with the entry name, only the supported unit types, and no
 /// shadowing of units the host already owns.
+fn validate_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::InvalidServiceName(name.into()))
+    }
+}
+
 fn validate_units(name: &str, units: &Units, host_dirs: &[PathBuf]) -> Result<()> {
     for unit in units.keys() {
         let ok = unit
@@ -865,6 +883,16 @@ mod tests {
         assert_eq!(mgr.reconcile().unwrap(), vec!["gone".to_string()]);
         assert!(mgr.state_path("man").exists());
         assert!(!mgr.service_dir("gone").exists());
+    }
+
+    #[test]
+    fn service_names_are_validated() {
+        for ok in ["web", "my-app", "a.b_c2"] {
+            assert!(validate_name(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "../evil", "a b", "a/b", ".hidden", "-x", "a\nb"] {
+            assert!(validate_name(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
