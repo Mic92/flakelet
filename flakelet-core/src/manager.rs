@@ -161,18 +161,21 @@ impl Manager {
     }
 
     fn service(&self, name: &str) -> Result<(ServiceConfig, Origin)> {
-        if let Some(svc) = self.config.services.get(name) {
-            return Ok((svc.clone(), Origin::Declarative));
-        }
-        let path = self.manual_config_path(name);
-        if !path.exists() {
-            return Err(Error::UnknownService(name.into()));
-        }
-        let data = fs::read_to_string(&path)
-            .map_err(Error::io(format!("cannot read {}", path.display())))?;
-        let svc = serde_json::from_str(&data)
-            .map_err(Error::json(format!("corrupt {}", path.display())))?;
-        Ok((svc, Origin::Manual))
+        let (svc, origin) = if let Some(svc) = self.config.services.get(name) {
+            (svc.clone(), Origin::Declarative)
+        } else {
+            let path = self.manual_config_path(name);
+            if !path.exists() {
+                return Err(Error::UnknownService(name.into()));
+            }
+            let data = fs::read_to_string(&path)
+                .map_err(Error::io(format!("cannot read {}", path.display())))?;
+            let svc = serde_json::from_str(&data)
+                .map_err(Error::json(format!("corrupt {}", path.display())))?;
+            (svc, Origin::Manual)
+        };
+        validate_output(name, &svc.output)?;
+        Ok((svc, origin))
     }
 
     fn state_dirs(&self) -> Result<Vec<String>> {
@@ -808,6 +811,25 @@ const HOST_UNIT_DIRS: &[&str] = &[
 /// Enforce the service contract on unit names before anything is activated:
 /// names start with the entry name, only the supported unit types, and no
 /// shadowing of units the host already owns.
+/// The output attribute path is spliced into the driver expression;
+/// restrict it to dotted identifiers to rule out Nix code injection.
+fn validate_output(service: &str, output: &str) -> Result<()> {
+    let ident = |s: &str| {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '\''))
+    };
+    if !output.is_empty() && output.split('.').all(ident) {
+        return Ok(());
+    }
+    Err(Error::InvalidOutput {
+        service: service.into(),
+        output: output.into(),
+    })
+}
+
 fn validate_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     let ok = name.len() <= 128
@@ -996,6 +1018,16 @@ mod tests {
             &"a".repeat(129),
         ] {
             assert!(validate_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn output_attrpaths_are_validated() {
+        for ok in ["flakelet", "flakelets.default", "a.b_c'.d-e"] {
+            assert!(validate_output("web", ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "a..b", "a.", "1a", "a) {}; evil = (x", "a b"] {
+            assert!(validate_output("web", bad).is_err(), "{bad:?}");
         }
     }
 

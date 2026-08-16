@@ -36,6 +36,8 @@ pub enum Error {
     UnknownService(String),
     #[error("no services with a flake reference")]
     NothingToCheck,
+    #[error("output '{output}' of '{service}' is not a dotted attribute path")]
+    InvalidOutput { service: String, output: String },
     #[error("invalid service name '{0}': use letters, digits, '-', '_' or '.'")]
     InvalidServiceName(String),
     #[error("service '{0}' was never deployed")]
