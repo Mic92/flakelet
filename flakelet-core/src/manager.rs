@@ -76,6 +76,27 @@ pub struct ServiceStatus {
     pub missing_providers: Vec<String>,
 }
 
+impl ServiceStatus {
+    fn named(name: String) -> Self {
+        Self {
+            name,
+            flake: String::new(),
+            origin: Origin::Manual,
+            generation: None,
+            units: Units::new(),
+            locked_url: None,
+            pin: None,
+            degraded: false,
+            held: None,
+            last_error: None,
+            updating: false,
+            missing_providers: Vec::new(),
+        }
+    }
+}
+
+pub type Failures = Vec<(String, Error)>;
+
 pub struct Manager {
     pub config: Config,
     system: String,
@@ -115,33 +136,43 @@ impl Manager {
         Ok((global, service))
     }
 
+    /// Names of declarative services plus manually deployed ones.
+    pub fn service_names(&self) -> Result<Vec<String>> {
+        let mut names: Vec<String> = self.config.services.keys().cloned().collect();
+        for name in self.state_dirs()? {
+            if !names.contains(&name) && self.manual_config_path(&name).exists() {
+                names.push(name);
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
     /// Declarative services from config.json plus manually deployed ones.
     /// On name collision the declarative definition wins.
     pub fn services(&self) -> Result<BTreeMap<String, (ServiceConfig, Origin)>> {
-        let mut all: BTreeMap<String, (ServiceConfig, Origin)> = self
-            .config
-            .services
-            .iter()
-            .map(|(n, s)| (n.clone(), (s.clone(), Origin::Declarative)))
-            .collect();
-        for name in self.state_dirs()? {
-            let path = self.manual_config_path(&name);
-            if all.contains_key(&name) || !path.exists() {
-                continue;
-            }
-            let data = fs::read_to_string(&path)
-                .map_err(Error::io(format!("cannot read {}", path.display())))?;
-            let svc = serde_json::from_str(&data)
-                .map_err(Error::json(format!("corrupt {}", path.display())))?;
-            all.insert(name, (svc, Origin::Manual));
-        }
-        Ok(all)
+        self.service_names()?
+            .into_iter()
+            .map(|name| {
+                let svc = self.service(&name)?;
+                Ok((name, svc))
+            })
+            .collect()
     }
 
     fn service(&self, name: &str) -> Result<(ServiceConfig, Origin)> {
-        self.services()?
-            .remove(name)
-            .ok_or_else(|| Error::UnknownService(name.into()))
+        if let Some(svc) = self.config.services.get(name) {
+            return Ok((svc.clone(), Origin::Declarative));
+        }
+        let path = self.manual_config_path(name);
+        if !path.exists() {
+            return Err(Error::UnknownService(name.into()));
+        }
+        let data = fs::read_to_string(&path)
+            .map_err(Error::io(format!("cannot read {}", path.display())))?;
+        let svc = serde_json::from_str(&data)
+            .map_err(Error::json(format!("corrupt {}", path.display())))?;
+        Ok((svc, Origin::Manual))
     }
 
     fn state_dirs(&self) -> Result<Vec<String>> {
@@ -164,31 +195,67 @@ impl Manager {
     }
 
     pub fn status(&self) -> Result<Vec<ServiceStatus>> {
-        self.services()?
-            .into_iter()
-            .map(|(name, (svc, origin))| {
-                let st = State::load(&self.state_path(&name))?;
-                let updating =
-                    lock::acquire(&self.service_lock(&name), true, false, "status probe").is_err();
-                Ok(ServiceStatus {
-                    name,
-                    flake: svc.flake,
-                    origin,
-                    generation: st.generation,
-                    units: st.units,
-                    locked_url: st.locked_url,
-                    pin: st.pin,
-                    degraded: st.degraded,
-                    held: st.hold.map(|h| h.reason),
-                    last_error: st.last_error,
-                    updating,
-                    missing_providers: exports::unannounced_claims(
-                        &st.exports,
-                        &self.config.providers_dir,
-                    ),
-                })
-            })
-            .collect()
+        let mut names = self.service_names()?;
+        for name in self.state_dirs()? {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names.sort();
+        let mut result = Vec::new();
+        for name in names {
+            let (svc, origin) = match self.service(&name) {
+                Ok(s) => s,
+                Err(Error::UnknownService(_)) => {
+                    result.push(ServiceStatus {
+                        last_error: Some(
+                            "state directory without configuration; remove or redeploy".into(),
+                        ),
+                        ..ServiceStatus::named(name)
+                    });
+                    continue;
+                }
+                Err(e) => {
+                    result.push(ServiceStatus {
+                        last_error: Some(e.to_string()),
+                        ..ServiceStatus::named(name)
+                    });
+                    continue;
+                }
+            };
+            let st = match State::load(&self.state_path(&name)) {
+                Ok(st) => st,
+                Err(e) => {
+                    result.push(ServiceStatus {
+                        flake: svc.flake,
+                        origin,
+                        last_error: Some(e.to_string()),
+                        ..ServiceStatus::named(name)
+                    });
+                    continue;
+                }
+            };
+            let updating =
+                lock::acquire(&self.service_lock(&name), true, false, "status probe").is_err();
+            result.push(ServiceStatus {
+                name,
+                flake: svc.flake,
+                origin,
+                generation: st.generation,
+                units: st.units,
+                locked_url: st.locked_url,
+                pin: st.pin,
+                degraded: st.degraded,
+                held: st.hold.map(|h| h.reason),
+                last_error: st.last_error,
+                updating,
+                missing_providers: exports::unannounced_claims(
+                    &st.exports,
+                    &self.config.providers_dir,
+                ),
+            });
+        }
+        Ok(result)
     }
 
     /// Resolve the flake refs of the given services (default: all with a
@@ -371,17 +438,27 @@ impl Manager {
     }
 
     /// Re-link the units of all deployed services at boot, without evaluation.
-    pub fn boot(&self) -> Result<Vec<String>> {
+    /// Returns the re-linked services and per-service failures.
+    pub fn boot(&self) -> Result<(Vec<String>, Failures)> {
         let mut linked = Vec::new();
+        let mut failed = Vec::new();
         for name in self.state_dirs()? {
-            let st = State::load(&self.state_path(&name))?;
-            if !st.units.is_empty() {
+            let relink = |name: &str| -> Result<bool> {
+                let st = State::load(&self.state_path(name))?;
+                if st.units.is_empty() {
+                    return Ok(false);
+                }
                 systemd::relink(&st.units)?;
-                exports::publish(&self.config.runtime_dir, &name, &st.exports)?;
-                linked.push(name);
+                exports::publish(&self.config.runtime_dir, name, &st.exports)?;
+                Ok(true)
+            };
+            match relink(&name) {
+                Ok(true) => linked.push(name),
+                Ok(false) => {}
+                Err(e) => failed.push((name, e)),
             }
         }
-        Ok(linked)
+        Ok((linked, failed))
     }
 
     pub fn lock_service(&self, name: &str) -> Result<String> {
@@ -405,9 +482,22 @@ impl Manager {
     pub fn gc(&self, keep_override: Option<u32>) -> Result<Vec<(String, Vec<u32>)>> {
         let _global = lock::acquire(&self.global_lock(), true, true, "gc")?;
         let mut pruned = Vec::new();
-        for (name, (svc, _)) in self.services()? {
-            let st = State::load(&self.state_path(&name))?;
-            let keep = keep_override.unwrap_or(svc.keep_generations);
+        for name in self.service_names()? {
+            let keep = match (keep_override, self.service(&name)) {
+                (Some(n), _) => n,
+                (None, Ok((svc, _))) => svc.keep_generations,
+                (None, Err(e)) => {
+                    eprintln!("{name}: skipped: {e}");
+                    continue;
+                }
+            };
+            let st = match State::load(&self.state_path(&name)) {
+                Ok(st) => st,
+                Err(e) => {
+                    eprintln!("{name}: skipped: {e}");
+                    continue;
+                }
+            };
             let gens =
                 Generations::new(&self.config.gcroot_dir, &name).prune(keep, st.generation)?;
             if !gens.is_empty() {

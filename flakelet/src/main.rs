@@ -433,16 +433,21 @@ fn run(cli: &Cli) -> Result<bool> {
                 for removed in mgr.reconcile()? {
                     println!("{removed}: removed (no longer configured)");
                 }
-                mgr.services()?.into_keys().collect()
+                mgr.service_names()?
             } else {
                 names.clone()
             };
             return Ok(update_all(&mgr, &names, *opts));
         }
         Cmd::Boot => {
-            for name in mgr.boot()? {
+            let (linked, failed) = mgr.boot()?;
+            for name in linked {
                 println!("{name}: units re-linked");
             }
+            for (name, err) in &failed {
+                eprintln!("{name}: error: {err}");
+            }
+            return Ok(failed.is_empty());
         }
         Cmd::Deploy { name, svc, opts } => {
             let outcome = mgr.deploy(name, svc, *opts)?;
