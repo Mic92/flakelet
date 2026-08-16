@@ -48,28 +48,32 @@ instead, for example from sops-nix, and load them in the unit with
 $ nix flake init -t github:Mic92/flakelet
 ```
 
-A service flake exports a function. It receives the host's `pkgs`, the entry
-`name` and the `settings` from the host configuration. It returns the unit
-files to run, as plain derivations. Hardening is ordinary systemd
-configuration such as `DynamicUser=` and `StateDirectory=`.
-
-Instead of writing unit files by hand, the injected `flakeletLib.mkService`
-offers a typed, NixOS-style interface:
+A service flake exports an [adios](https://github.com/adisbladis/adios)-style
+module: declared `options` for what the host may pass, and an `impl`
+returning the units to run in a typed, NixOS-style interface. Hardening is
+ordinary systemd configuration such as `DynamicUser=` and `StateDirectory=`.
 
 ```nix
-flakelets.default = { pkgs, flakeletLib, name, settings, ... }:
-  flakeletLib.mkService {
+flakelets.default = { types, ... }: {
+  options.port = { type = types.number; default = 8000; description = "listen port"; };
+
+  impl = { options, pkgs, name, ... }: {
     services.${name} = {
       # no [Install] section: only started when the socket is hit
       serviceConfig.ExecStart = "${pkgs.myservice}/bin/serve";
       serviceConfig.DynamicUser = true;
     };
     sockets.${name} = {
-      socketConfig.ListenStream = settings.port;
+      socketConfig.ListenStream = options.port;
       wantedBy = [ "sockets.target" ];
     };
   };
+};
 ```
+
+The host settings are checked against the options before `impl` is
+evaluated: unknown keys, wrong types and missing required settings fail the
+update with the offending name.
 
 Units with an `[Install]` section (`wantedBy`) are enabled and started on
 activation. Units without one are left to systemd's on-demand activation: a
@@ -79,9 +83,9 @@ restarted either way.
 
 Health lives in the units: `Type=notify` or `ExecStartPost=` for readiness,
 `Restart=` for liveness. A service can additionally ship a
-`<name>-health.service` oneshot (or pass `healthCheck` to `mkService`);
+`<name>-health.service` oneshot (or return `healthCheck`);
 flakelet starts it after every activation and rolls back when it fails.
-The function can also return `exports`,
+The impl can also return `exports`,
 free-form metadata like claimed ports or metrics endpoints. flakelet publishes
 the exports of the running generation to `/run/flakelet/exports/<name>.json`,
 where firewall, reverse-proxy, monitoring or backup tooling can pick them up.
@@ -115,7 +119,7 @@ the machine and to fill the binary cache.
 ## Contracts and providers
 
 Blessed contracts live in [contracts/](contracts/) as JSON Schema, with
-eval-time constructors in `flakeletLib.contracts`. Known implementations:
+eval-time constructors in the injected `contracts`. Known implementations:
 
 | Contract      | Implementation                                                    |
 | ------------- | ----------------------------------------------------------------- |

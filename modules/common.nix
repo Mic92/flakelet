@@ -97,7 +97,7 @@ in
 
     flakeletLib = lib.mkOption {
       type = lib.types.path;
-      description = "flakelet.lib source (mkService, storePath), injected into service modules.";
+      description = "flakelet.lib source used by the driver to check settings and render units.";
     };
 
     extraModules = lib.mkOption {

@@ -7,21 +7,33 @@ let
     {
       outputs = _: {
         flakelets.default =
-          { pkgs, name, settings, ... }:
+          { types, ... }:
           {
-            units."''${name}.service" = pkgs.writeText "''${name}.service" '''
-              [Unit]
-              Description=flakelet test service
-              [Service]
-              Environment=GREETING=''${settings.greeting}
-              ExecStart=''${pkgs.coreutils}/bin/sleep infinity
-              [Install]
-              WantedBy=multi-user.target
-            ''';
-            exports = {
-              metrics = [ { port = 9100; } ];
-              ports.web.port = settings.port;
+            options = {
+              greeting = { type = types.string; };
+              port = {
+                type = types.number;
+                default = 8080;
+                description = "export-only demo port";
+              };
             };
+            impl =
+              { options, pkgs, name, ... }:
+              {
+                units."''${name}.service" = pkgs.writeText "''${name}.service" '''
+                  [Unit]
+                  Description=flakelet test service
+                  [Service]
+                  Environment=GREETING=''${options.greeting}
+                  ExecStart=''${pkgs.coreutils}/bin/sleep infinity
+                  [Install]
+                  WantedBy=multi-user.target
+                ''';
+                exports = {
+                  metrics = [ { port = 9100; } ];
+                  ports.web.port = options.port;
+                };
+              };
           };
       };
     }

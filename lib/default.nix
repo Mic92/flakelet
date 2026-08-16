@@ -1,14 +1,18 @@
-# flakelet.lib, instantiated per service entry by the driver expression and
-# injected into service modules as the `flakeletLib` argument.
+# flakelet.lib, instantiated per service entry and consumed by the driver
+# expression. Service modules follow the adios module shape:
 #
-#   flakelets.default = { pkgs, flakeletLib, name, settings, ... }:
-#     flakeletLib.mkService {
+#   flakelets.default = { types, ... }: {
+#     options = {
+#       port = { type = types.number; default = 8000; description = "..."; };
+#     };
+#     impl = { options, pkgs, name, ... }: {
 #       services.${name} = {
 #         description = "My service";
 #         wantedBy = [ "multi-user.target" ];
 #         serviceConfig.ExecStart = "${pkgs.myservice}/bin/serve";
 #       };
 #     };
+#   };
 {
   pkgs,
   name,
@@ -66,7 +70,7 @@ let
   # `serviceconfig` must not produce a unit without an ExecStart).
   unitType =
     kind: extra:
-    (t.struct "mkService ${kind}" (
+    (t.struct "module ${kind}" (
       lib.mapAttrs (_: _: strings) unitKeys
       // {
         description = t.string;
@@ -82,7 +86,7 @@ let
         unknown = false;
       };
   argsType =
-    (t.struct "mkService" {
+    (t.struct "module" {
       services = t.attrsOf (unitType "service" {
         serviceConfig = configSection;
         environment = t.attrsOf scalar;
@@ -112,7 +116,7 @@ let
     let
       err = type.verify v;
     in
-    if err == null then v else throw "flakeletLib.mkService: ${err}";
+    if err == null then v else fail "in module: ${err}";
 
 
   # mkValueStringDefault aborts on attrsets, so derivations (e.g. a package
@@ -169,9 +173,79 @@ let
         Environment = lib.mapAttrsToList (k: v: builtins.toJSON "${k}=${toValue v}") env;
       }
     );
+  adiosTypes = import "${adios}/adios/types.nix" { korora = t; };
+
+  fail = msg: throw "flakelet ${name}: ${msg}";
 in
-{
-  mkService =
+rec {
+  types = t;
+
+  # Adios option declarations `{ type, default?, description?, example? }`.
+  # Unknown keys are rejected; missing keys take the default, or null when
+  # the type is nullable.
+  evalOptions =
+    options: settings:
+    let
+      unknown = lib.filter (k: !(options ? ${k})) (lib.attrNames settings);
+      checkDecl =
+        n: decl:
+        let
+          e = adiosTypes.modules.option.verify decl;
+        in
+        if decl ? defaultFunc then
+          fail "in option '${n}': defaultFunc is not supported, use default"
+        else if e != null then
+          fail "in option '${n}': ${e}"
+        else
+          decl;
+      value =
+        n: decl:
+        if settings ? ${n} then
+          let
+            e = decl.type.verify settings.${n};
+          in
+          if e != null then fail "in setting '${n}': ${e}" else settings.${n}
+        else if decl ? default then
+          decl.default
+        else if decl.type.verify null == null then
+          null
+        else
+          fail "missing required setting '${n}'";
+    in
+    if unknown != [ ] then
+      fail "unknown setting(s) ${lib.concatStringsSep ", " unknown}; known: ${lib.concatStringsSep ", " (lib.attrNames options)}"
+    else
+      lib.mapAttrs (n: decl: value n (checkDecl n decl)) options;
+
+  evalModule =
+    def:
+    {
+      settings,
+      extraModules ? [ ],
+    }:
+    let
+      m =
+        if lib.isFunction def then
+          def { types = t; }
+        else
+          fail "the module must be a function: { types, ... }: { options, impl }";
+    in
+    if m ? inputs then
+      fail "module inputs are not supported; pkgs, name and helpers are injected into impl"
+    else
+      render (m.impl {
+        options = evalOptions (m.options or { }) settings;
+        inherit
+          pkgs
+          name
+          contracts
+          storePath
+          extraModules
+          ;
+      });
+
+  # Validate the attrset impl returns and render it into unit files.
+  render =
     args:
     let
       a = check argsType args;
@@ -182,7 +256,7 @@ in
         // lib.optionalAttrs (a ? healthCheck) {
           health =
             if a ? services.health then
-              throw "flakeletLib.mkService: healthCheck and services.health are mutually exclusive"
+              fail "healthCheck and services.health are mutually exclusive"
             else
               {
                 description = "health probe for ${name}";
@@ -204,7 +278,7 @@ in
         // (a.units or { });
     in
     if units == { } then
-      throw "flakeletLib.mkService: no units defined"
+      fail "no units defined"
     else
       { inherit units; } // lib.optionalAttrs (a ? exports) { inherit (a) exports; };
 
@@ -237,7 +311,7 @@ in
           { unknown = false; };
       err = type.verify v;
     in
-    if err == null then v else throw "flakeletLib.contracts.http: ${err}";
+    if err == null then v else fail "in contracts.http: ${err}";
 
   # Turn a bare store path string from the settings into a string with context,
   # so the built artifact really depends on it. builtins.storePath is banned in
@@ -248,7 +322,7 @@ in
       s = builtins.unsafeDiscardStringContext (toString p);
     in
     if !lib.hasPrefix "${builtins.storeDir}/" s then
-      throw "flakeletLib.storePath: ${s} is not a store path"
+      fail "storePath: ${s} is not a store path"
     else
       builtins.appendContext s { ${s}.path = true; };
 }

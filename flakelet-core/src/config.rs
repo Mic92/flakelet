@@ -123,9 +123,10 @@ impl Config {
                 })
             }
         };
-        // flakelet.lib imports korora from the adios source tree instead of
-        // vendoring a copy; fail early instead of deep inside an evaluation.
-        if cfg.flakelet_lib.is_some() && cfg.adios.is_none() {
+        // The driver validates modules with flakelet.lib, which imports
+        // korora from the adios source tree; fail early instead of deep
+        // inside an evaluation.
+        if cfg.flakelet_lib.is_none() || cfg.adios.is_none() {
             return Err(Error::LibRequiresAdios);
         }
         if cfg.version > SCHEMA_VERSION {

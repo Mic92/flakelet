@@ -25,17 +25,20 @@ The moving parts are deliberately few:
 2. The NixOS module `services.flakelets`. It renders the machine-wide
    configuration file `/etc/flakelet/config.json` and generates the systemd
    units and timers that trigger updates.
-3. A small set of Nix libraries that flakelet injects into service modules:
-   [adios](https://github.com/adisbladis/adios) together with korora, which
-   gives service authors typed options, and `flakelet.lib` (injected as
-   `flakeletLib`). Its `mkService` offers a typed, NixOS-style unit interface
-   with `services.<name>.serviceConfig`, `sockets` and `timers`, an automatic
-   name prefix, hard errors on unknown keys and a raw `units` escape hatch,
-   so existing NixOS modules can be ported by copy and paste. It also carries
-   the `storePath` helper described below.
-4. The service flakes themselves. They live in their own repositories and do
-   not need any flake inputs, because everything they need is passed in as
-   arguments.
+3. `flakelet.lib`, applied by the driver expression. It checks the
+   host-provided settings against the module's declared options
+   ([adios](https://github.com/adisbladis/adios) declarations over korora
+   types: `{ type, default?, description? }`, unknown keys rejected) and
+   validates and renders what `impl` returns: a typed, NixOS-style unit
+   interface with `services.<name>.serviceConfig`, `sockets` and `timers`,
+   an automatic name prefix, hard errors on unknown keys and a raw `units`
+   escape hatch, so existing NixOS modules can be ported by copy and paste.
+   Helpers (`contracts`, `storePath`) are injected into `impl`.
+4. The service flakes themselves, in the adios module shape:
+   `flakelets.<output> = { types, … }: { options = {…}; impl = {…}: {…}; }`.
+   adios' `inputs`/`defaultFunc` wiring is not supported: a flakelet is a
+   single module whose inputs the driver injects. They live in their own
+   repositories and do not need any flake inputs.
 
 ## Service contract
 
@@ -214,7 +217,7 @@ One subtlety about settings that contain store paths: a string like
 built artifact does not depend on it and nix would happily garbage-collect
 it. flakelet therefore checks that such paths exist before evaluating and
 gc-roots them per generation. If a service needs actual build-time content
-from the host, `flakeletLib.storePath` turns such a string into one with
+from the host, the injected `storePath` helper turns such a string into one with
 context (via `builtins.appendContext`, since `builtins.storePath` is banned
 in pure evaluation), making the artifact really depend on it.
 
@@ -630,16 +633,16 @@ exports above. `requires` is a claim a provider must act on: "I need a
 postgres database". It travels in the same exports file:
 
 ```nix
-flakeletLib.mkService {
+impl = { options, pkgs, name, ... }: {
   services.${name}.serviceConfig = {
     ExecStart = "${pkg}/bin/serve --db postgresql://${name}@/${name}?host=/run/postgresql";
     User = name;
   };
   exports = {
-    http.web = { host = settings.domain; upstream = "unix:/run/${name}/web.sock"; };
+    http.web = { host = options.domain; upstream = "unix:/run/${name}/web.sock"; };
     requires.postgres = { database = name; role = name; };
   };
-}
+};
 ```
 
 There is no feedback channel from provider to service: contracts are
@@ -690,12 +693,12 @@ mistakes rather than attackers. If multi-tenancy ever arrives, provider-side
 grant options are the extension point; flakelet core would not change.
 
 Where a contract lives follows one criterion: whether services reach it
-through the injected `flakeletLib` (service flakes are input-free, so
+through the injected module arguments (service flakes are input-free, so
 anything they need must be injectable) and whether core interprets it.
 `ports` is core-enforced and cannot move. Pure descriptions that are
 near-universal and multi-implementation — `http`, later `metrics` and
 `state` — are blessed here: JSON Schema in `contracts/`, constructor in
-`flakeletLib.contracts`. Backing-service contracts such as `postgres` live
+the injected `contracts`. Backing-service contracts such as `postgres` live
 in their implementation's repository (`flakelet-postgres`), because their
 hard parts — add-only provisioning, orphans, rollback interplay — are
 inseparable from the provider, and the family is open-ended (redis,

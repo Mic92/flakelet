@@ -31,9 +31,6 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
         "  pkgs = import {nixpkgs} {{ system = {}; }};",
         nix_string(system)
     );
-    if let Some(adios) = &config.adios {
-        let _ = writeln!(out, "  adios = import {};", adios.display());
-    }
     // Derivations in exports become their out paths, so consumers of the
     // published exports.json execute store paths of the running generation.
     out.push_str(
@@ -62,23 +59,11 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             ),
             None => "pkgs".into(),
         };
-        // Config::load guarantees adios is set whenever flakelet_lib is.
-        let lib_binding = match (&config.flakelet_lib, &config.adios) {
-            (Some(lib), Some(adios)) => format!(
-                "\n      flakeletLib = import {} {{ pkgs = entryPkgs; name = {}; adios = {}; }};",
-                lib.display(),
-                nix_string(e.name),
-                adios.display()
-            ),
-            _ => String::new(),
+        // Config::load guarantees both are set for flake-based services.
+        let (lib_path, adios) = match (&config.flakelet_lib, &config.adios) {
+            (Some(lib), Some(adios)) => (lib, adios),
+            _ => panic!("driver requires flakelet_lib and adios in the config"),
         };
-        let mut module_args = "pkgs = entryPkgs;".to_string();
-        if config.adios.is_some() {
-            module_args.push_str(" inherit adios;");
-        }
-        if config.flakelet_lib.is_some() {
-            module_args.push_str(" inherit flakeletLib;");
-        }
         let meta = serde_json::json!({
             "version": 1,
             "name": e.name,
@@ -90,11 +75,11 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             out,
             r#"  {attr} =
     let
-      entryPkgs = {entry_pkgs};{lib_binding}
-      module = (builtins.getFlake {url}).{output} {{
-        {module_args}
-        name = {name};
-        settings = {settings};
+      entryPkgs = {entry_pkgs};
+      entrySettings = {settings};
+      flakeletLib = import {lib_path} {{ pkgs = entryPkgs; name = {name}; adios = {adios}; }};
+      module = flakeletLib.evalModule (builtins.getFlake {url}).{output} {{
+        settings = entrySettings;
         extraModules = [ {extra_modules} ];
       }};
     in
@@ -110,8 +95,8 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
             url = nix_string(e.locked_url),
             output = e.output,
             entry_pkgs = entry_pkgs,
-            lib_binding = lib_binding,
-            module_args = module_args,
+            lib_path = lib_path.display(),
+            adios = adios.display(),
             name = nix_string(e.name),
             settings = json_to_nix(e.settings),
             meta = nix_string(&meta.to_string()),
@@ -171,6 +156,7 @@ mod tests {
         let config = Config {
             nixpkgs: Some("/nix/store/aaa-source".into()),
             adios: Some("/nix/store/bbb-adios".into()),
+            flakelet_lib: Some("/nix/store/ccc-flakelet-lib".into()),
             ..Config::default()
         };
         let settings = json!({ "port": 3000 });
@@ -193,44 +179,22 @@ mod tests {
         assert!(
             expr.contains(r#"builtins.getFlake "github:me/grafana-svc/abc?narHash=sha256-xyz""#)
         );
-        assert!(expr.contains(r#"settings = { "port" = 3000; };"#));
-        assert!(expr.contains("entryPkgs = pkgs;"));
-        assert!(expr.contains("pkgs = entryPkgs; inherit adios;"));
-        assert!(expr.contains(r#"\"settings_hash\":\"deadbeef\""#));
-    }
-
-    #[test]
-    fn render_driver_with_flakelet_lib() {
-        let config = Config {
-            nixpkgs: Some("/nix/store/aaa-source".into()),
-            adios: Some("/nix/store/bbb-adios".into()),
-            flakelet_lib: Some("/nix/store/ccc-flakelet-lib".into()),
-            ..Config::default()
-        };
-        let settings = json!({});
-        let expr = render(
-            &config,
-            "x86_64-linux",
-            &[DriverEntry {
-                name: "svc",
-                locked_url: "github:me/svc/abc?narHash=sha256-xyz",
-                locked_rev: "abc",
-                output: "flakelets.default",
-                settings: &settings,
-                settings_hash: "h",
-                nixpkgs_override: None,
-            }],
-        );
+        assert!(expr.contains(r#"entrySettings = { "port" = 3000; };"#));
         assert!(expr.contains(
-            r#"flakeletLib = import /nix/store/ccc-flakelet-lib { pkgs = entryPkgs; name = "svc"; adios = /nix/store/bbb-adios; };"#
+            r#"flakeletLib = import /nix/store/ccc-flakelet-lib { pkgs = entryPkgs; name = "grafana"; adios = /nix/store/bbb-adios; };"#
         ));
-        assert!(expr.contains("pkgs = entryPkgs; inherit adios; inherit flakeletLib;"));
+        assert!(expr.contains("flakeletLib.evalModule (builtins.getFlake"));
+        assert!(expr.contains("settings = entrySettings;"));
+        assert!(expr.contains("entryPkgs = pkgs;"));
+        assert!(expr.contains(r#"\"settings_hash\":\"deadbeef\""#));
     }
 
     #[test]
     fn render_driver_with_nixpkgs_override() {
         let config = Config {
             nixpkgs: Some("/nix/store/aaa-source".into()),
+            adios: Some("/nix/store/bbb-adios".into()),
+            flakelet_lib: Some("/nix/store/ccc-flakelet-lib".into()),
             ..Config::default()
         };
         let settings = json!({});

@@ -1,5 +1,5 @@
-# Exercises flakelet.lib: mkService rendering, name prefixing, the raw units
-# escape hatch, unknown-key errors and the storePath helper.
+# Exercises flakelet.lib: option evaluation, unit rendering, name prefixing,
+# the raw units escape hatch, unknown-key errors and the storePath helper.
 {
   pkgs,
   lib,
@@ -15,7 +15,37 @@ let
     name = "web";
   };
 
-  result = flakeletLib.mkService {
+  checked = flakeletLib.evalOptions {
+    greeting = {
+      type = flakeletLib.types.string;
+      description = "demo greeting";
+    };
+    port = {
+      type = flakeletLib.types.number;
+      default = 8080;
+    };
+    token = {
+      type = flakeletLib.types.option flakeletLib.types.string;
+    };
+  } { greeting = "hi"; };
+
+  evaluated = flakeletLib.evalModule (
+    { types, ... }:
+    {
+      options.port = {
+        type = types.number;
+        default = 9000;
+      };
+      impl =
+        { options, pkgs, name, ... }:
+        {
+          services.${name}.serviceConfig.ExecStart = "${pkgs.coreutils}/bin/true --port ${toString options.port}";
+          exports.ports.http.port = options.port;
+        };
+    }
+  ) { settings = { }; };
+
+  result = flakeletLib.render {
     services.web = {
       description = "demo web service";
       after = [ "network.target" ];
@@ -78,13 +108,36 @@ assert fails (flakeletLib.contracts.http {
   upstream = "u";
   websokets = true;
 });
-assert fails (flakeletLib.mkService { bogus = 1; });
-assert fails (flakeletLib.mkService { services.web.serviceconfig = { }; });
-assert fails (flakeletLib.mkService { services.web.after = "network.target"; });
-assert fails (flakeletLib.mkService { services.web.wantedBy = [ 5 ]; });
-assert fails (flakeletLib.mkService { services.web.description = [ "x" ]; });
-assert fails (flakeletLib.mkService { });
+assert fails (flakeletLib.render { bogus = 1; });
+assert fails (flakeletLib.render { services.web.serviceconfig = { }; });
+assert fails (flakeletLib.render { services.web.after = "network.target"; });
+assert fails (flakeletLib.render { services.web.wantedBy = [ 5 ]; });
+assert fails (flakeletLib.render { services.web.description = [ "x" ]; });
+assert fails (flakeletLib.render { });
 assert fails (flakeletLib.storePath "/etc/passwd");
+assert checked == {
+  greeting = "hi";
+  port = 8080;
+  token = null;
+};
+assert fails (flakeletLib.evalOptions { p = { type = flakeletLib.types.number; }; } { q = 1; });
+assert fails (flakeletLib.evalOptions { p = { type = flakeletLib.types.number; }; } { p = "x"; });
+assert fails (flakeletLib.evalOptions { p = { type = flakeletLib.types.number; }; } { });
+assert fails (flakeletLib.evalOptions {
+  p = {
+    type = flakeletLib.types.number;
+    defaultFunc = _: 1;
+  };
+} { p = 1; });
+assert evaluated.exports.ports.http.port == 9000;
+assert lib.attrNames evaluated.units == [ "web.service" ];
+assert fails (flakeletLib.evalModule { options = { }; } { settings = { }; });
+assert fails (
+  flakeletLib.evalModule (_: {
+    inputs.nixpkgs.path = "/nixpkgs";
+    impl = _: { };
+  }) { settings = { }; }
+);
 assert builtins.hasContext helloPath;
 assert result.exports.ports.http.port == 8080;
 assert lib.attrNames result.units == [
