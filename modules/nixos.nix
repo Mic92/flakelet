@@ -20,6 +20,8 @@ in
       home = "/var/cache/flakelet";
     };
     users.groups.flakelet = { };
+    # Evaluation and builds run as this user via the daemon.
+    nix.settings.extra-allowed-users = [ "flakelet" ];
 
     systemd.tmpfiles.rules = [
       "d /var/lib/flakelet 0750 root root -"
