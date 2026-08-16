@@ -24,24 +24,38 @@ pub fn acquire(path: &Path, exclusive: bool, wait: bool, info: &str) -> Result<L
         .open(path)
         .map_err(Error::io(context()))?;
 
-    let op = match (exclusive, wait) {
-        (true, true) => FlockOperation::LockExclusive,
-        (true, false) => FlockOperation::NonBlockingLockExclusive,
-        (false, true) => FlockOperation::LockShared,
-        (false, false) => FlockOperation::NonBlockingLockShared,
+    let (try_op, blocking_op) = match exclusive {
+        true => (
+            FlockOperation::NonBlockingLockExclusive,
+            FlockOperation::LockExclusive,
+        ),
+        false => (
+            FlockOperation::NonBlockingLockShared,
+            FlockOperation::LockShared,
+        ),
     };
-    if let Err(errno) = flock(&file, op) {
-        if errno == rustix::io::Errno::WOULDBLOCK || errno == rustix::io::Errno::AGAIN {
-            let holder = std::fs::read_to_string(path).unwrap_or_default();
-            return Err(Error::LockHeld {
-                path: path.to_path_buf(),
-                holder: holder.trim().into(),
+    if let Err(errno) = flock(&file, try_op) {
+        if errno != rustix::io::Errno::WOULDBLOCK && errno != rustix::io::Errno::AGAIN {
+            return Err(Error::Io {
+                context: context(),
+                source: errno.into(),
             });
         }
-        return Err(Error::Io {
-            context: context(),
-            source: errno.into(),
-        });
+        let holder = std::fs::read_to_string(path).unwrap_or_default();
+        let holder = holder.trim();
+        if !wait {
+            return Err(Error::LockHeld {
+                path: path.to_path_buf(),
+                holder: holder.into(),
+            });
+        }
+        eprintln!("waiting for lock {} held by {holder}", path.display());
+        if let Err(errno) = flock(&file, blocking_op) {
+            return Err(Error::Io {
+                context: context(),
+                source: errno.into(),
+            });
+        }
     }
     if exclusive {
         let _ = file.set_len(0);
