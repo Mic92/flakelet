@@ -624,13 +624,12 @@ impl Manager {
 
         if let Err(err) = result {
             let reason = err.to_string();
-            // Restore the previous units; their settings are baked into their store paths.
-            if !previous_units.is_empty() {
-                systemd::switch(&units, &previous_units).map_err(|e| Error::RollbackFailed {
-                    service: name.into(),
-                    source: Box::new(e),
-                })?;
-            }
+            // Restore the previous units. On a first deploy this stops
+            // and unlinks the failed units.
+            systemd::switch(&units, &previous_units).map_err(|e| Error::RollbackFailed {
+                service: name.into(),
+                source: Box::new(e),
+            })?;
             st.hold = Some(Hold {
                 reason: reason.clone(),
                 settings_hash: artifact.settings_hash,
