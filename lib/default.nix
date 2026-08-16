@@ -192,6 +192,37 @@ in
     else
       { inherit units; } // lib.optionalAttrs (a ? exports) { inherit (a) exports; };
 
+  # Blessed contract constructors; the JSON shape is the interface
+  # (contracts/*.json), these only check it at evaluation time.
+  contracts.http =
+    args:
+    let
+      v = {
+        paths = [ "/" ];
+        websockets = false;
+        maxBodySize = "1m";
+        readTimeout = "60s";
+        buffering = true;
+        extra = { };
+      }
+      // args;
+      type =
+        (t.struct "http/v1" {
+          host = t.string;
+          upstream = t.string;
+          paths = t.listOf t.string;
+          websockets = t.bool;
+          maxBodySize = t.string;
+          readTimeout = t.string;
+          buffering = t.bool;
+          # Non-portable escape hatch, keyed by webserver implementation.
+          extra = t.attrsOf t.string;
+        }).override
+          { unknown = false; };
+      err = type.verify v;
+    in
+    if err == null then v else throw "flakeletLib.contracts.http: ${err}";
+
   # Turn a bare store path string from the settings into a string with context,
   # so the built artifact really depends on it. builtins.storePath is banned in
   # pure evaluation; appendContext is the pure-mode equivalent.

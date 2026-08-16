@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Mic92/flakelet/blob/main/contracts/http-v1.json",
+  "title": "http/v1",
+  "description": "Reverse-proxy declaration published as exports.http.<name>. Implementations announce { \"contract\": \"http/v1\" }.",
+  "type": "object",
+  "required": ["host", "upstream"],
+  "additionalProperties": false,
+  "properties": {
+    "host": {
+      "type": "string",
+      "description": "Virtual host name to serve."
+    },
+    "upstream": {
+      "type": "string",
+      "description": "Backend: \"unix:/run/<name>/web.sock\" or \"host:port\"."
+    },
+    "paths": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["/"]
+    },
+    "websockets": { "type": "boolean", "default": false },
+    "maxBodySize": { "type": "string", "default": "1m" },
+    "readTimeout": {
+      "type": "string",
+      "default": "60s",
+      "description": "Long values keep SSE / long-poll streams alive."
+    },
+    "buffering": { "type": "boolean", "default": true },
+    "extra": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Non-portable raw config, keyed by implementation, e.g. extra.nginx."
+    }
+  }
+}

@@ -56,6 +56,28 @@ let
   helloPath = flakeletLib.storePath (builtins.unsafeDiscardStringContext "${hello}");
 in
 # Unknown keys, wrong value types and empty results are hard errors.
+assert
+  flakeletLib.contracts.http {
+    host = "x.example.com";
+    upstream = "unix:/run/web/web.sock";
+    readTimeout = "3600s";
+    buffering = false;
+  } == {
+    host = "x.example.com";
+    upstream = "unix:/run/web/web.sock";
+    paths = [ "/" ];
+    websockets = false;
+    maxBodySize = "1m";
+    readTimeout = "3600s";
+    buffering = false;
+    extra = { };
+  };
+assert fails (flakeletLib.contracts.http { host = "x"; });
+assert fails (flakeletLib.contracts.http {
+  host = "x";
+  upstream = "u";
+  websokets = true;
+});
 assert fails (flakeletLib.mkService { bogus = 1; });
 assert fails (flakeletLib.mkService { services.web.serviceconfig = { }; });
 assert fails (flakeletLib.mkService { services.web.after = "network.target"; });
