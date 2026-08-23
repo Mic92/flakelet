@@ -56,8 +56,10 @@ pub enum Error {
         found: u32,
         supported: u32,
     },
-    #[error("service '{0}' is declared in the host configuration; not overriding it manually")]
+    #[error("service '{0}' is declared in the host configuration. Use 'flakelet update {0} --flake <ref>' to test another ref")]
     DeclaredService(String),
+    #[error("service '{0}' uses a prebuilt artifact. --flake has no effect")]
+    OverrideWithPrebuilt(String),
     #[error("input override '{input}' of '{service}' is not supported; only 'nixpkgs' can be overridden")]
     UnsupportedInputOverride { service: String, input: String },
     #[error("the config requires flakelet_lib and adios (module validation and the korora type checker)")]

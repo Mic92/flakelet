@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::slice;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct UpdateOpts {
     pub force: bool,
     pub no_wait: bool,
@@ -23,6 +23,18 @@ pub struct UpdateOpts {
     pub offline_fallback: bool,
     /// Skip `--refresh` when resolving flake refs (offline use, tests).
     pub no_refresh: bool,
+    /// Testing override for the flake ref. The next update without it
+    /// reverts to the configured ref.
+    pub flake: Option<String>,
+}
+
+/// Precedence: --flake override, then pin, then the configured ref.
+fn effective_flake_ref<'a>(
+    override_ref: Option<&'a str>,
+    pin: Option<&'a str>,
+    configured: &'a str,
+) -> &'a str {
+    override_ref.or(pin).unwrap_or(configured)
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -69,6 +81,8 @@ pub struct ServiceStatus {
     pub units: Units,
     pub locked_url: Option<String>,
     pub pin: Option<String>,
+    /// Testing ref when the active generation came from `update --flake`.
+    pub override_flake: Option<String>,
     pub degraded: bool,
     pub held: Option<String>,
     pub last_error: Option<String>,
@@ -86,6 +100,7 @@ impl ServiceStatus {
             units: Units::new(),
             locked_url: None,
             pin: None,
+            override_flake: None,
             degraded: false,
             held: None,
             last_error: None,
@@ -248,6 +263,7 @@ impl Manager {
                 units: st.units,
                 locked_url: st.locked_url,
                 pin: st.pin,
+                override_flake: st.override_flake,
                 degraded: st.degraded,
                 held: st.hold.map(|h| h.reason),
                 last_error: st.last_error,
@@ -535,12 +551,16 @@ impl Manager {
 
     pub fn update(&self, name: &str, opts: UpdateOpts) -> Result<UpdateOutcome> {
         let (svc, origin) = self.service(name)?;
+        if opts.flake.is_some() && svc.prebuilt.is_some() {
+            return Err(Error::OverrideWithPrebuilt(name.into()));
+        }
         let _locks = self.locks(name, !opts.no_wait, "update")?;
         let state_path = self.state_path(name);
         let mut st = State::load(&state_path)?;
         st.origin = origin;
+        st.override_flake = opts.flake.clone();
 
-        match self.try_update(name, &svc, &mut st, opts) {
+        match self.try_update(name, &svc, &mut st, &opts) {
             Ok(outcome) => {
                 st.save(&state_path)?;
                 Ok(outcome)
@@ -569,7 +589,7 @@ impl Manager {
         name: &str,
         svc: &ServiceConfig,
         st: &mut State,
-        opts: UpdateOpts,
+        opts: &UpdateOpts,
     ) -> Result<UpdateOutcome> {
         let nix = self.nix(svc);
 
@@ -602,8 +622,16 @@ impl Manager {
                 ..Artifact::default()
             }
         } else {
-            // Flake ref: pinned URL wins.
-            let flake_ref = st.pin.clone().unwrap_or_else(|| svc.flake.clone());
+            let flake_ref =
+                effective_flake_ref(opts.flake.as_deref(), st.pin.as_deref(), &svc.flake)
+                    .to_string();
+            if opts.flake.is_some() {
+                eprintln!(
+                    "{name}: warning: testing override, the next update without \
+                     --flake (including host activations) reverts to {}",
+                    st.pin.as_deref().unwrap_or(&svc.flake)
+                );
+            }
             eprintln!("{name}: resolving {flake_ref}");
             let locked = nix.locked_url(&flake_ref, !opts.no_refresh)?;
 
@@ -1000,6 +1028,21 @@ mod tests {
         assert_eq!(mgr.reconcile().unwrap(), vec!["gone".to_string()]);
         assert!(mgr.state_path("man").exists());
         assert!(!mgr.service_dir("gone").exists());
+    }
+
+    #[test]
+    fn flake_ref_precedence() {
+        let over = "github:me/app/test-branch";
+        let pin = "github:me/app/abc123";
+        assert_eq!(
+            effective_flake_ref(Some(over), Some(pin), "github:me/app"),
+            over
+        );
+        assert_eq!(effective_flake_ref(None, Some(pin), "github:me/app"), pin);
+        assert_eq!(
+            effective_flake_ref(None, None, "github:me/app"),
+            "github:me/app"
+        );
     }
 
     #[test]
