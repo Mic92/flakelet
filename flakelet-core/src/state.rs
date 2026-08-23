@@ -33,6 +33,8 @@ pub struct State {
     pub locked_url: Option<String>,
     /// Pinned flake URL set by `flakelet lock`.
     pub pin: Option<String>,
+    /// Testing ref from `update --flake`. Cleared by the next regular update.
+    pub override_flake: Option<String>,
     /// Set after a failed deploy; cleared when settings/rev change or --force.
     pub hold: Option<Hold>,
     /// Running an older cached generation because the last eval failed offline.
@@ -50,6 +52,7 @@ impl Default for State {
             exports: Value::Null,
             locked_url: None,
             pin: None,
+            override_flake: None,
             hold: None,
             degraded: false,
             last_error: None,

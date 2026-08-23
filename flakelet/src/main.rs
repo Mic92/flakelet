@@ -14,7 +14,7 @@ flakelet - deploy systemd services from Nix flakes, evaluated at runtime
 Usage: flakelet [--config <file>] <command> [options]
 
 Commands:
-  update [<name>...] [--force] [--no-wait] [--offline-fallback]
+  update [<name>...] [--force] [--no-wait] [--offline-fallback] [--flake <ref>]
                         Evaluate, build and activate services (default: all)
   boot                  Re-link the current generations at boot, without evaluation
   deploy <name> --flake <ref> [--settings <file>] [--output <attr>] [update options]
@@ -62,15 +62,20 @@ Run 'flakelet <command> --help' for command-specific examples.
 fn command_help(command: &str) -> Option<&'static str> {
     Some(match command {
         "update" => "\
-Usage: flakelet update [<name>...] [--force] [--no-wait] [--offline-fallback] [--no-refresh]
+Usage: flakelet update [<name>...] [--force] [--no-wait] [--offline-fallback] [--no-refresh] [--flake <ref>]
 
 Evaluate, build and activate services. Without names all configured
 services are updated and vanished declarative services are removed.
+
+--flake deploys one service from another ref for testing. The next
+update without it (including host activations) reverts to the
+configured ref.
 
 Examples:
   flakelet update
   flakelet update web api
   flakelet update web --force            Retry a held service
+  flakelet update web --flake github:me/web/fix-branch
   flakelet update --offline-fallback     Keep running units when the network is down
 ",
         "boot" => "\
@@ -331,7 +336,15 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         }
     };
     let command = match command.as_str() {
-        "update" => Cmd::Update { names, opts },
+        "update" => {
+            if flake.is_some() {
+                if names.len() != 1 {
+                    return Err("update --flake expects exactly one service name".into());
+                }
+                opts.flake = flake.clone();
+            }
+            Cmd::Update { names, opts }
+        }
         "boot" => Cmd::Boot,
         "deploy" => Cmd::Deploy {
             name: one_name(&names)?,
@@ -437,7 +450,7 @@ fn run(cli: &Cli) -> Result<bool> {
             } else {
                 names.clone()
             };
-            return Ok(update_all(&mgr, &names, *opts));
+            return Ok(update_all(&mgr, &names, opts.clone()));
         }
         Cmd::Boot => {
             let (linked, failed) = mgr.boot()?;
@@ -450,7 +463,7 @@ fn run(cli: &Cli) -> Result<bool> {
             return Ok(failed.is_empty());
         }
         Cmd::Deploy { name, svc, opts } => {
-            let outcome = mgr.deploy(name, svc, *opts)?;
+            let outcome = mgr.deploy(name, svc, opts.clone())?;
             println!("{name}: {}", describe(&outcome));
             return Ok(success(&outcome));
         }
@@ -524,7 +537,7 @@ fn read_settings(path: Option<&Path>) -> Result<Value> {
 fn update_all(mgr: &Manager, names: &[String], opts: UpdateOpts) -> bool {
     let mut ok = true;
     for name in names {
-        match mgr.update(name, opts) {
+        match mgr.update(name, opts.clone()) {
             Ok(outcome) => {
                 println!("{name}: {}", describe(&outcome));
                 ok &= success(&outcome);
@@ -567,14 +580,20 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
         } else {
             "not deployed"
         };
-        let pin = if s.pin.is_some() { "\t(pinned)" } else { "" };
+        let mark = if let Some(over) = &s.override_flake {
+            format!("\t(override {over})")
+        } else if s.pin.is_some() {
+            "\t(pinned)".into()
+        } else {
+            String::new()
+        };
         println!(
             "{}\t{}\tgen {}\t{}{}",
             s.name,
             state,
             s.generation.map_or("-".into(), |g| g.to_string()),
             s.flake,
-            pin
+            mark
         );
         if let Some(err) = s.held.as_deref().or(s.last_error.as_deref()) {
             let mut lines = err.lines().map(str::trim);
