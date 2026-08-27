@@ -33,6 +33,12 @@ in
       wantedBy = [ "multi-user.target" ];
     };
 
+    # Providers order their backing service before this so `provision`
+    # hooks can run when updates start at boot.
+    systemd.targets.flakelet-providers = {
+      description = "flakelet contract providers ready";
+    };
+
     systemd.services = {
       # Re-link the current generations early at boot; no evaluation, no network.
       flakelet-boot = {
@@ -63,9 +69,13 @@ in
       lib.nameValuePair "flakelet-${name}" {
         description = "Update flakelet service ${name}";
         wantedBy = [ "multi-user.target" ];
-        wants = [ "network-online.target" ];
+        wants = [
+          "network-online.target"
+          "flakelet-providers.target"
+        ];
         after = [
           "network-online.target"
+          "flakelet-providers.target"
           "flakelet-reconcile.service"
         ];
         before = [ "flakelet.target" ];

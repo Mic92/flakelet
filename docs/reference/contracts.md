@@ -82,7 +82,8 @@ Local socket, peer authentication, no password. The service connects as
   `status` warn about claims without an announcer.
 - Optional `"provision": "<exe>"`, called as `<exe> <claim.json>` per claim
   before the units of a new generation start. A non-zero exit fails the
-  update before any unit is touched.
+  update before any unit is touched. On NixOS, order the backing service
+  before `flakelet-providers.target` so boot-time updates can reach it.
 - Providers that need to converge on removal (vhosts) or have no
   `provision` hook watch `/run/flakelet/exports` level-triggered and
   reconcile from the whole directory.
