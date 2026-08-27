@@ -1,9 +1,9 @@
 # Contracts and export schemas
 
-`exports` is free-form JSON. The shapes below are the ones flakelet core or
-known providers act on. All are published in
-`/run/flakelet/exports/<name>.json`; providers watch that directory with a
-path unit and reconcile from its full contents.
+`exports` is free-form JSON, published per service as
+`/run/flakelet/exports/<name>.json`. This page lists the shapes that
+flakelet core or a known provider acts on, and what a provider has to
+implement.
 
 ## Interpreted by flakelet core
 
@@ -14,9 +14,9 @@ path unit and reconcile from its full contents.
   // { protocol ? "tcp"; internal ? false; }
 ```
 
-Activation is refused when two managed services claim the same port. No
-schema file; firewall tooling may consume it. A service that wants the
-host to own the socket ships a `.socket` unit instead.
+Activation is refused when two managed services claim the same port.
+There is no schema file. Firewall tooling may read it. A service that
+wants the host to own the socket ships a `.socket` unit instead.
 
 ### `exports.state.extraFolders`
 
@@ -24,11 +24,11 @@ host to own the socket ships a `.socket` unit instead.
 [ "/srv/media" ]
 ```
 
-Absolute, non-store paths carried by `export` in addition to
-`StateDirectory=`. Constraints in the
+Absolute, non-store paths that `export` carries in addition to
+`StateDirectory=`. Constraints are in the
 [service module reference](service-module.md#derived-state-description).
 
-## Blessed descriptions (schema in this repo)
+## Descriptions with a schema in this repo
 
 ### `exports.metrics`
 
@@ -40,28 +40,29 @@ Prometheus-style scrape targets.
 
 ### `exports.http.<name>` — `http/v1`
 
-Schema: [`contracts/http-v1.json`](../../contracts/http-v1.json).
-Constructor: `contracts.http { … }` (checks at eval time, fills defaults).
+Build it with `contracts.http { … }`, which checks the fields at eval time
+and fills the defaults. Schema:
+[`contracts/http-v1.json`](../../contracts/http-v1.json).
 
-| field         | type            | default  |
-| ------------- | --------------- | -------- |
-| `host`        | string          | required |
-| `upstream`    | `"unix:/run/…"` or `"host:port"` | required |
-| `paths`       | listOf string   | `[ "/" ]`|
-| `websockets`  | bool            | `false`  |
-| `maxBodySize` | string          | `"1m"`   |
-| `readTimeout` | string          | `"60s"`  |
-| `buffering`   | bool            | `true`   |
-| `extra.<impl>`| string          | —        |
+| field         | type                             | default   |
+| ------------- | -------------------------------- | --------- |
+| `host`        | string                           | required  |
+| `upstream`    | `"unix:/run/…"` or `"host:port"` | required  |
+| `paths`       | listOf string                    | `[ "/" ]` |
+| `websockets`  | bool                             | `false`   |
+| `maxBodySize` | string                           | `"1m"`    |
+| `readTimeout` | string                           | `"60s"`   |
+| `buffering`   | bool                             | `true`    |
+| `extra.<impl>`| string                           | —         |
 
-Prefer unix-socket upstreams in `RuntimeDirectory=`: no port collisions,
-works with `DynamicUser=`. TLS, public names and access policy are the
-provider's business, not the service's.
+Prefer a unix socket in `RuntimeDirectory=` as upstream. It cannot
+collide with another port and works with `DynamicUser=`. TLS, public
+names and access policy belong to the provider.
 
-Implementation: [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)
-(stateless, nothing to export).
+Provider: [flakelet-nginx](https://github.com/Mic92/flakelet-nginx).
+Stateless, so there is nothing to export.
 
-## Claims (`exports.requires.*`, schema in the provider's repo)
+## Claims with a schema in the provider's repo
 
 ### `exports.requires.postgres` — `postgres/v1`
 
@@ -69,38 +70,58 @@ Implementation: [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)
 { database = name; role = name; }
 ```
 
-Local socket, peer authentication, no password. The service connects as
-`User=<role>` to `/run/postgresql`. Implementation:
-[flakelet-postgres](https://github.com/Mic92/flakelet-postgres)
-(export/import supported).
+The service connects as `User=<role>` to `/run/postgresql` with peer
+authentication and no password.
 
-## Provider rules
+Provider: [flakelet-postgres](https://github.com/Mic92/flakelet-postgres).
+Supports export/import.
 
-- One provider per contract per host, announced in
-  `/etc/flakelet/providers.d/<anything>.json`:
-  `{ "contract": "postgres/v1" }`. Unknown keys are ignored. `check` and
-  `status` warn about claims without an announcer.
-- Optional `"provision": "<exe>"`, called as `<exe> <claim.json>` per claim
-  before the units of a new generation start. A non-zero exit fails the
-  update before any unit is touched. On NixOS, order the backing service
-  before `flakelet-providers.target` so boot-time updates can reach it.
-- Providers that need to converge on removal (vhosts) or have no
-  `provision` hook watch `/run/flakelet/exports` level-triggered and
-  reconcile from the whole directory.
-- Provisioning is idempotent and add-only. Nothing is dropped on
-  `remove`; orphans are listed by the provider and deleted by humans.
-  Stateless renderings (vhosts) do converge, which is why `remove` deletes
-  the exports file.
-- No feedback channel to the service. Outcomes are deterministic from the
-  claim, so the service bakes them into its units at eval time.
-- Optional `"state": { "dump": "<exe>", "restore": "<exe>" }` in the
-  announcement. Called by `export`/`import` as `<exe> <claim.json> <dir>`
-  per claim. `restore` must create the resource if absent and refuse a
-  non-empty one. Without `state` the provider's consumers are not
-  exportable.
+## Writing a provider
+
+A provider announces itself with one file in `/etc/flakelet/providers.d/`.
+The file name does not matter. Unknown keys are ignored.
+
+```json
+{
+  "contract": "postgres/v1",
+  "provision": "/nix/store/…/bin/provision",
+  "state": {
+    "dump": "/nix/store/…/bin/dump",
+    "restore": "/nix/store/…/bin/restore"
+  }
+}
+```
+
+Only `contract` is required. `check` and `status` warn about claims that
+no file announces. flakelet runs the hooks as root, once per
+`requires.<contract>` claim:
+
+| hook            | called as                  | when                                     |
+| --------------- | -------------------------- | ---------------------------------------- |
+| `provision`     | `<exe> <claim.json>`       | `update`/`activate`, before units switch |
+| `state.dump`    | `<exe> <claim.json> <dir>` | `export`, while the service is stopped   |
+| `state.restore` | `<exe> <claim.json> <dir>` | `import`, before the first activation    |
+
+Rules:
+
+- One provider per contract per host.
+- `provision` is idempotent and add-only. A non-zero exit fails the update
+  before any unit is touched. On NixOS, order the backing service before
+  `flakelet-providers.target` so updates at boot can reach it.
+- Nothing is dropped on `remove`. A rollback must find its database. The
+  provider lists orphans and a human deletes them.
+- Stateless renderings such as vhosts are the exception. They watch
+  `/run/flakelet/exports` and reconcile from the whole directory, which is
+  why `remove` deletes the exports file.
+- There is no feedback channel to the service. Everything the service
+  needs follows from the claim, so it bakes those values into its units at
+  eval time.
+- `restore` creates the resource if absent and refuses a non-empty one.
+  Without `state` hooks the provider's consumers are not exportable.
 - Providers extend host services only through append-safe merge points
-  (nginx `include`, SQL) and must coexist with an existing
+  (nginx `include`, SQL) and coexist with an existing
   `services.nginx`/`services.postgresql`.
 
-New blessed fields need a working implementation and a real consumer;
-recurring `extra.<impl>` keys are the signal to promote one.
+A new field earns a place in a schema once an implementation and a real
+consumer exist. Recurring `extra.<impl>` keys are the signal to promote
+one.
