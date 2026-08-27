@@ -42,6 +42,8 @@ pub enum Error {
     InvalidServiceName(String),
     #[error("service '{0}' was never deployed")]
     NeverDeployed(String),
+    #[error("service '{service}' is disabled ({reason}), run 'flakelet enable {service}' first")]
+    Disabled { service: String, reason: String },
     #[error("service '{0}' has no older generation to roll back to")]
     NoOlderGeneration(String),
     #[error("settings of '{service}' reference dangling store path {path}")]

@@ -34,7 +34,9 @@ let
     bucket=$(${pkgs.jq}/bin/jq -r .bucket "$2")
     case "$1" in
       dump) cp /srv/kv/"$bucket" "$3/data" ;;
-      restore) test ! -e /srv/kv/"$bucket"; mkdir -p /srv/kv; cp "$3/data" /srv/kv/"$bucket" ;;
+      restore)
+        if [ -z "''${FLAKELET_REPLACE:-}" ]; then test ! -e /srv/kv/"$bucket"; fi
+        mkdir -p /srv/kv; cp "$3/data" /srv/kv/"$bucket" ;;
     esac
   '';
   node =
@@ -87,16 +89,42 @@ in
     a.succeed("echo payload > /var/lib/private/web/file")
 
     a.succeed("flakelet export web --dry-run | grep -q /var/lib/web")
-    a.succeed("flakelet export web > /tmp/shared/web.tar.zst")
-    print(a.succeed("tar --zstd -tf /tmp/shared/web.tar.zst"))
+    a.succeed("flakelet export web --copy > /tmp/shared/web.tar.zst")
     a.succeed("systemctl is-active web.service")
     a.succeed("test -f /var/lib/private/web/dump")
+
+    # A move leaves the source disabled across updates and boot.
+    a.succeed("flakelet export web --to b > /tmp/shared/web.tar.zst")
+    print(a.succeed("tar --zstd -tf /tmp/shared/web.tar.zst"))
+    a.fail("systemctl is-active web.service")
+    a.succeed("flakelet update web --no-refresh | grep disabled")
+    a.succeed("systemctl restart flakelet-web.service")
+    a.succeed("flakelet boot")
+    a.fail("systemctl is-active web.service")
+    a.succeed("flakelet status web | grep 'exported to b'")
+    a.fail("flakelet rollback web")
+    a.succeed("flakelet enable web")
+    a.succeed("systemctl is-active web.service")
+    a.succeed("grep -q payload /var/lib/private/web/file")
+    a.succeed("flakelet disable web -m done")
 
 
     # Occupy a dynamic uid so b allocates a different one than a.
     b.succeed("systemd-run -p DynamicUser=yes -u squat sleep infinity")
-    b.succeed("flakelet import - --no-refresh < /tmp/shared/web.tar.zst", timeout=600)
+    # A failing restore hook after extraction leaves b empty and disabled.
+    b.succeed("systemctl start flakelet-web.service", timeout=600)
     b.succeed("systemctl is-active web.service")
+    b.succeed("mkdir -p /srv/kv && echo stale > /srv/kv/web")
+    b.fail("flakelet import - --no-refresh < /tmp/shared/web.tar.zst")
+    b.fail("systemctl is-active web.service")
+    b.succeed("flakelet status web | grep 'did not finish'")
+    b.succeed("test -z \"$(ls -A /var/lib/private/web)\"")
+    b.succeed("echo junk > /var/lib/private/web/junk")
+    b.fail("flakelet import /tmp/shared/web.tar.zst --no-refresh")
+    b.succeed("flakelet import /tmp/shared/web.tar.zst --no-refresh --replace", timeout=600)
+    b.succeed("test ! -e /var/lib/private/web/junk")
+    b.succeed("systemctl is-active web.service")
+    b.succeed("flakelet status web | grep ok | grep pinned")
     b.succeed("grep -q payload /var/lib/private/web/file")
     b.succeed("test -f /var/lib/private/web/restored")
     b.succeed("grep -q bucket-data /srv/kv/web")

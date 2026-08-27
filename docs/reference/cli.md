@@ -13,6 +13,8 @@ same information with examples.
 | `deploy <name> --flake <ref> [--settings <file>] [--output <attr>] [update options]` | register a manual entry in `/var/lib/flakelet/<name>/service.json` and update it |
 | `activate <name> <store path>` | register and start a prebuilt artifact, no evaluation |
 | `rollback <name>` | switch to the previous generation; the next update rolls forward again |
+| `disable <name> [-m <reason>]` | stop and unlink the units and mark the entry [disabled](files.md#statejson). Updates, host activation and reboots leave it alone |
+| `enable <name>` | clear the mark and start the current generation. No evaluation, works offline |
 | `lock <name>` / `unlock <name>` | pin to / release the currently resolved revision |
 | `remove [--purge] <name>` | stop, unlink, delete generations and bookkeeping, delete the exports file. State folders are kept and listed; `--purge` empties them |
 | `reconcile` | remove declarative entries no longer in config.json |
@@ -23,7 +25,7 @@ same information with examples.
 
 | command | does |
 | ------- | ---- |
-| `status [<name>…] [--json]` | generation, revision, held/degraded, lock holder, `export_blockers`, missing providers |
+| `status [<name>…] [--json]` | generation, revision, held/degraded/disabled, lock holder, `export_blockers`, missing providers |
 | `diff <name> [--no-refresh]` | `nix store diff-closures` between running generation and a fresh evaluation |
 | `driver [<name>…] [--machine <m> [--flake <ref>]]` | print the generated driver expression |
 
@@ -43,14 +45,15 @@ are only visible on their machine.
 
 | command | does |
 | ------- | ---- |
-| `export <name> [-o <file>\|-] [--dry-run]` | stop units, run `<name>-dump.service` and provider dump hooks, tar `StateDirectory=` folders, start units, write zstd tar to stdout or `<file>`. `--dry-run` prints the would-be `meta.json` or the blockers |
-| `import <file>\|- [--name <n>] [--settings <file>] [update options]` | build pinned to the exported revision, verify target folders are empty, extract, run provider restore hooks and `<name>-restore.service`, activate. Uses an existing/declared entry if present (then `--settings` is ignored), else registers a manual one from the archived flake ref with `--settings` (default none). `--name` imports as a clone |
+| `export <name> [-o <file>\|-] [--to <host>] [--copy] [--dry-run]` | stop units, run `<name>-dump.service` and provider dump hooks, tar `StateDirectory=` folders, write zstd tar to stdout or `<file>`, then leave the entry disabled (`--to` labels the reason). `--copy` starts the units again instead. `--dry-run` prints the would-be `meta.json` or the blockers |
+| `import <file>\|- [--name <n>] [--settings <file>] [--replace] [update options]` | build pinned to the exported revision, verify target folders are empty (or clear them with `--replace`, providers see `FLAKELET_REPLACE=1`), disable the entry, extract, run provider restore hooks and `<name>-restore.service`, activate. A failure after extraction empties the folders and leaves the entry disabled. Uses an existing/declared entry if present (then `--settings` is ignored), else registers a manual one from the archived flake ref with `--settings` (default none). `--name` imports as a clone |
 
 See [Moving a service](../guides/moving-a-service.md).
 
 ## Exit status
 
-Non-zero on any failure, including a deploy that was rolled back. Network
+Non-zero on any failure, including a deploy that was rolled back. A
+disabled entry is not a failure. Network
 errors exit 75 (`EX_TEMPFAIL`) so a service manager can retry just those;
 with `--offline-fallback` and an existing generation they exit 0 and mark
 the entry degraded instead.

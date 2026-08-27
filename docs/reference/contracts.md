@@ -121,6 +121,8 @@ Rules:
   needs follows from the claim, so it bakes those values into its units at
   eval time.
 - `restore` creates the resource if absent and refuses a non-empty one.
+  With `FLAKELET_REPLACE=1` in the environment (`import --replace`) it may
+  drop and recreate it instead.
   Without `state` hooks the provider's consumers are not exportable.
 - Providers extend host services only through append-safe merge points
   (nginx `include`, SQL) and coexist with an existing

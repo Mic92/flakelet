@@ -5,85 +5,89 @@ elsewhere and starts the service. The service author does nothing extra as
 long as state lives in `StateDirectory=` (see
 [Writing a service → State](writing-a-service.md#state)).
 
-## The short version
-
-```console
-hosta$ flakelet export web | ssh hostb flakelet import -
-```
-
-On hosta, `export` stops all units of `web`. It runs `web-dump.service` if
-the service ships one. Then it tars every `StateDirectory=` folder, starts
-the units again and streams a zstd archive to stdout.
-
-On hostb, `import` builds `web` pinned to the exported revision. It checks
-that the state folders are empty and extracts the archive into them. Then
-it runs `web-restore.service` and activates the service, health probe
-included.
-
-If hostb's NixOS configuration already declares `web`, that entry and its
-settings are used. Otherwise a manual entry is registered from the flake
-reference in the archive.
-
 ## Check first
 
 ```console
 hosta$ flakelet export web --dry-run | jq
 ```
 
-This prints what would be exported, or why the service cannot be
-exported.
+prints what would be exported, or why the service cannot be exported.
 
-## Settings on the target
-
-Settings do not travel. They are host configuration and usually name
-secrets or certificates that only exist on hosta. If hostb declares `web`
-in its NixOS configuration, those settings are used. Otherwise pass them:
+## Move
 
 ```console
-hostb$ cat web.json
-{ "port": 8080, "tlsCert": "/run/secrets/web-cert" }
-hostb$ flakelet import web.flakelet.tar.zst --settings web.json
+hosta$ flakelet export web --to hostb | ssh hostb flakelet import -
 ```
 
-## To a file
+On hosta, `export` stops all units of `web`, runs `web-dump.service` if
+the service ships one, tars every `StateDirectory=` folder and streams a
+zstd archive to stdout. `web` is then left **disabled** on hosta: updates,
+`nixos-rebuild switch` and reboots no longer start it. `--to` only labels
+what `flakelet status` shows.
+
+On hostb, `import` builds `web` pinned to the exported revision, checks
+that its state folders are empty, extracts the archive, runs
+`web-restore.service` and starts the service with its health probe. If
+hostb's NixOS configuration declares `web`, that entry and its settings
+are used. Otherwise a manual entry is registered from the flake reference
+in the archive; pass `--settings <file>` if the service needs any, since
+settings are host configuration and do not travel.
+
+Finally move the `services.flakelets.services.web` block from hosta's
+configuration to hostb's and deploy both. hostb adopts the running entry
+and stays on the imported revision until `flakelet unlock web`. hosta
+forgets the disabled entry and lists the folders that still hold the old
+data.
+
+## If it did not work
+
+hosta is disabled whether or not hostb succeeded. To run `web` there
+again:
 
 ```console
-hosta$ flakelet export web -o web.flakelet.tar.zst
-hostb$ flakelet import web.flakelet.tar.zst
+hosta$ flakelet enable web
 ```
 
-The archive holds no settings, store paths or secret contents. It does
-hold the service's state, so treat it accordingly.
+On hostb, a failure before extraction changed nothing. A failure after it
+(restore hook, health probe) empties the folders again and leaves `web`
+disabled there; fix the cause and repeat the import.
 
-## Cloning under another name
-
-Units and directories derive from the entry name, so importing under a new
-name yields an independent copy, also on the same host:
+If hostb already ran `web` before the import, its folders are not empty
+and import refuses. `--replace` clears them and tells provider restore
+hooks to overwrite:
 
 ```console
-$ flakelet export web -o web.tar.zst
-$ flakelet import web.tar.zst --name web-staging --settings staging.json
+hostb$ flakelet import web.flakelet.tar.zst --replace
 ```
+
+## Copies and backups
+
+`--copy` starts the service again after archiving instead of disabling
+it, `-o` writes to a file:
+
+```console
+hosta$ flakelet export web --copy -o web.flakelet.tar.zst
+```
+
+Importing under another name gives an independent instance, also on the
+same host:
+
+```console
+hosta$ flakelet import web.flakelet.tar.zst --name web-staging --settings staging.json
+```
+
+The archive holds no settings, store paths or secret contents, but it
+does hold the service's data.
 
 ## Databases and other provider resources
 
 A service with `exports.requires.postgres` does not dump the database
-itself. `export` calls the postgres provider's dump hook, `import` calls
-its restore hook, which also creates the database on the target. This only
-works if the provider on both hosts announces `state` support (check with
-`--dry-run`).
+itself. `export` calls the postgres provider's dump hook and `import` its
+restore hook, which also creates the database on the target. Both hosts'
+providers must announce `state` support; `--dry-run` tells.
 
 ## Static users
 
 uids need not match between hosts. For `User=` services and
-`exports.state.extraFolders` the named user and group must already exist
-on the target host ([why](../design.md#users-and-state-ownership)).
-
-## What can go wrong
-
-- *state folder not empty*: import refuses to overwrite. `flakelet remove
-  --purge web` on the target clears a previous attempt.
-- *build fails on the target*: nothing was extracted yet. A freshly
-  registered manual entry is removed again.
-- *health probe fails after restore*: normal rollback rules apply, the
-  service is put on hold and `flakelet status` shows why.
+`exports.state.extraFolders` the named user and group must exist on the
+target ([why](../design.md#users-and-state-ownership)).

@@ -2,7 +2,7 @@ use crate::config::{Config, ServiceConfig, SCHEMA_VERSION};
 use crate::driver::DriverEntry;
 use crate::error::{Error, Result};
 use crate::generations::{Generations, Manifest};
-use crate::state::{write_json_atomic, Hold, Origin, State};
+use crate::state::{write_json_atomic, Disabled, DisabledBy, Hold, Origin, State};
 use crate::svcstate::StateInfo;
 use crate::systemd::Units;
 use crate::transfer::{self, ExportMeta};
@@ -30,6 +30,8 @@ pub struct UpdateOpts {
     pub flake: Option<String>,
     /// Unpacked export archive to restore state from before activation.
     pub restore_from: Option<PathBuf>,
+    /// Import: clear state folders instead of requiring them empty.
+    pub replace: bool,
 }
 
 /// Precedence: --flake override, then pin, then the configured ref.
@@ -48,6 +50,7 @@ pub enum UpdateOutcome {
     Degraded { reason: String },
     Held { reason: String },
     RolledBack { reason: String },
+    Disabled { reason: String },
 }
 
 /// Options for the off-machine `check` pipeline.
@@ -89,6 +92,7 @@ pub struct ServiceStatus {
     pub override_flake: Option<String>,
     pub degraded: bool,
     pub held: Option<String>,
+    pub disabled: Option<Disabled>,
     pub last_error: Option<String>,
     pub updating: bool,
     pub failed_units: Vec<String>,
@@ -110,6 +114,7 @@ impl ServiceStatus {
             override_flake: None,
             degraded: false,
             held: None,
+            disabled: None,
             last_error: None,
             updating: false,
             failed_units: Vec::new(),
@@ -155,6 +160,56 @@ impl Manager {
         st.generation
             .map(|g| Generations::new(&self.config.gcroot_dir, name).manifest(g))
             .transpose()
+    }
+
+    fn running(&self, name: &str, st: &State) -> Result<Manifest> {
+        if let Some(d) = &st.disabled {
+            return Err(Error::Disabled {
+                service: name.into(),
+                reason: d.reason.clone(),
+            });
+        }
+        self.current(name, st)?
+            .ok_or_else(|| Error::NeverDeployed(name.into()))
+    }
+
+    fn set_disabled(&self, name: &str, st: &mut State, reason: &str, by: DisabledBy) -> Result<()> {
+        if let Some(m) = self.current(name, st)? {
+            systemd::remove(&m.units)?;
+        }
+        exports::unpublish(&self.config.runtime_dir, name)?;
+        st.disabled = Some(Disabled {
+            reason: reason.into(),
+            by,
+            since: unix_time(),
+        });
+        st.save(&self.state_path(name))
+    }
+
+    pub fn disable(&self, name: &str, reason: &str) -> Result<()> {
+        self.service(name)?;
+        let _locks = self.locks(name, true, "disable")?;
+        let mut st = State::load(&self.state_path(name))?;
+        self.set_disabled(name, &mut st, reason, DisabledBy::Operator)
+    }
+
+    /// Starts the current generation without evaluating.
+    pub fn enable(&self, name: &str) -> Result<Option<u32>> {
+        self.service(name)?;
+        let _locks = self.locks(name, true, "enable")?;
+        let mut st = State::load(&self.state_path(name))?;
+        if st.disabled.is_none() {
+            return Ok(st.generation);
+        }
+        st.disabled = None;
+        let Some(m) = self.current(name, &st)? else {
+            st.save(&self.state_path(name))?;
+            return Ok(None);
+        };
+        exports::publish(&self.config.runtime_dir, name, &m.exports)?;
+        systemd::start(&m.units, true).and_then(|()| health_check_run(name, &m.units))?;
+        st.save(&self.state_path(name))?;
+        Ok(st.generation)
     }
 
     fn service_dir(&self, name: &str) -> PathBuf {
@@ -294,6 +349,7 @@ impl Manager {
                 override_flake: st.override_flake.clone(),
                 degraded: st.degraded,
                 held: st.hold.as_ref().map(|h| h.reason.clone()),
+                disabled: st.disabled.clone(),
                 last_error: st.last_error.clone(),
                 updating,
                 ..ServiceStatus::named(name.clone())
@@ -334,6 +390,9 @@ impl Manager {
         );
         if st.degraded {
             b.push("running a degraded (cached) generation".into());
+        }
+        if let Some(d) = &st.disabled {
+            b.push(format!("disabled ({})", d.reason));
         }
         b
     }
@@ -433,10 +492,7 @@ impl Manager {
     pub fn diff(&self, name: &str, refresh: bool) -> Result<String> {
         let (svc, _) = self.service(name)?;
         let st = State::load(&self.state_path(name))?;
-        let old = self
-            .current(name, &st)?
-            .ok_or_else(|| Error::NeverDeployed(name.into()))?
-            .artifact;
+        let old = self.running(name, &st)?.artifact;
         let new = match &svc.prebuilt {
             Some(prebuilt) => prebuilt.clone(),
             None => {
@@ -542,6 +598,9 @@ impl Manager {
         for name in self.state_dirs()? {
             let relink = |name: &str| -> Result<bool> {
                 let st = State::load(&self.state_path(name))?;
+                if st.disabled.is_some() {
+                    return Ok(false);
+                }
                 let Some(m) = self.current(name, &st)? else {
                     return Ok(false);
                 };
@@ -613,9 +672,7 @@ impl Manager {
         let _locks = self.locks(name, true, "rollback")?;
         let mut st = State::load(&self.state_path(name))?;
         let gens = Generations::new(&self.config.gcroot_dir, name);
-        let current = self
-            .current(name, &st)?
-            .ok_or_else(|| Error::NeverDeployed(name.into()))?;
+        let current = self.running(name, &st)?;
         let target = *gens
             .list()?
             .iter()
@@ -664,8 +721,15 @@ impl Manager {
         Ok((meta, manifest.units))
     }
 
-    /// Stop the service, collect its state into `out`, start it again.
-    pub fn export(&self, name: &str, out: &Path) -> Result<ExportMeta> {
+    /// Stop the service, collect its state into `out` and leave it
+    /// disabled, or with `copy` running again.
+    pub fn export(
+        &self,
+        name: &str,
+        out: &Path,
+        copy: bool,
+        to: Option<&str>,
+    ) -> Result<ExportMeta> {
         let _locks = self.locks(name, true, "export")?;
         let (meta, units) = self.export_meta(name)?;
         fs::create_dir_all(&self.config.cache_dir).map_err(Error::io("create cache dir"))?;
@@ -689,18 +753,27 @@ impl Manager {
                     });
                 }
             }
-            transfer::provider_hooks(&meta.exports, &self.config.providers_dir, dir, false)?;
+            transfer::provider_hooks(&meta.exports, &self.config.providers_dir, dir, false, false)?;
             for (i, folder) in meta.state.folders.iter().enumerate() {
                 eprintln!("{name}: archiving {}", folder.path.display());
                 transfer::tar_folder(folder, &dir.join(format!("state/{i}.tar")))?;
             }
             Ok(())
         })();
-        eprintln!("{name}: starting units");
-        let restarted = systemd::start(&units, true);
-        collected?;
-        restarted?;
-        transfer::pack(dir, out)?;
+        let packed = collected.and_then(|()| transfer::pack(dir, out));
+        if copy || packed.is_err() {
+            eprintln!("{name}: starting units");
+            let started = systemd::start(&units, true);
+            packed?;
+            started?;
+            return Ok(meta);
+        }
+        let reason = match to {
+            Some(h) => format!("exported to {h}"),
+            None => "exported".into(),
+        };
+        let mut st = State::load(&self.state_path(name))?;
+        self.set_disabled(name, &mut st, &reason, DisabledBy::Export)?;
         Ok(meta)
     }
 
@@ -724,10 +797,11 @@ impl Manager {
         validate_name(&name)?;
         // With --name the folders derive differently, only the build can tell.
         if !renamed {
-            self.import_precheck(&name, &meta.state, &meta.exports)?;
+            self.import_precheck(&name, &meta.state, &meta.exports, !opts.replace)?;
         }
 
         let fresh = self.service(&name).is_err();
+        let locks = self.locks(&name, !opts.no_wait, "import")?;
         if fresh {
             let mut svc = ServiceConfig {
                 flake: meta.flake.clone(),
@@ -737,12 +811,12 @@ impl Manager {
             if let Some(s) = settings {
                 svc.settings = s;
             }
-            let _locks = self.locks(&name, !opts.no_wait, "import")?;
             write_json_atomic(&self.manual_config_path(&name), &svc)?;
-            let mut st = State::load(&self.state_path(&name))?;
-            st.pin = Some(meta.flake_url.clone());
-            st.save(&self.state_path(&name))?;
         }
+        let mut st = State::load(&self.state_path(&name))?;
+        st.pin = Some(meta.flake_url.clone());
+        st.save(&self.state_path(&name))?;
+        drop(locks);
         opts.restore_from = Some(work.path().to_path_buf());
         opts.force = true;
         let result = self.update(&name, opts);
@@ -754,13 +828,19 @@ impl Manager {
     }
 
     /// Host-side conditions for restoring `state` here.
-    fn import_precheck(&self, name: &str, state: &StateInfo, exports: &Value) -> Result<()> {
+    fn import_precheck(
+        &self,
+        name: &str,
+        state: &StateInfo,
+        exports: &Value,
+        need_empty: bool,
+    ) -> Result<()> {
         let mut reasons =
             svcstate::blockers(Some(state), exports, &self.config.providers_dir, true);
         for f in &state.folders {
             let real = transfer::real_path(f);
-            if !transfer::is_empty_dir(&real) {
-                reasons.push(format!("{} is not empty", real.display()));
+            if need_empty && !transfer::is_empty_dir(&real) {
+                reasons.push(format!("{} is not empty (see --replace)", real.display()));
             }
             if !f.dynamic && !transfer::user_exists(&f.user) {
                 reasons.push(format!("user '{}' does not exist on this host", f.user));
@@ -777,9 +857,16 @@ impl Manager {
         }
     }
 
-    /// Between build and activation of an import: put the archived state in
-    /// place so the units start on top of it.
-    fn restore(&self, name: &str, previous: &Units, artifact: &Artifact, dir: &Path) -> Result<()> {
+    /// Between build and activation of an import: put the archived state
+    /// in place. The entry is disabled meanwhile so a crash starts nothing.
+    fn restore(
+        &self,
+        name: &str,
+        st: &mut State,
+        artifact: &Artifact,
+        dir: &Path,
+        replace: bool,
+    ) -> Result<()> {
         let meta = ExportMeta::load(dir)?;
         let Some(target) = &artifact.state else {
             return Err(Error::NotTransferable {
@@ -817,15 +904,27 @@ impl Manager {
                 reasons,
             });
         }
-        self.import_precheck(name, target, &artifact.exports)?;
+        self.import_precheck(name, target, &artifact.exports, !replace)?;
 
-        systemd::remove(previous)?;
+        let reason = format!("import from {} did not finish", meta.source_host);
+        self.set_disabled(name, st, &reason, DisabledBy::Import)?;
         let run = || -> Result<()> {
+            if replace {
+                for folder in &target.folders {
+                    transfer::clear_dir(&transfer::real_path(folder));
+                }
+            }
             for (i, folder) in target.folders.iter().enumerate() {
                 eprintln!("{name}: restoring {}", folder.path.display());
                 transfer::untar_folder(folder, &dir.join(format!("state/{i}.tar")))?;
             }
-            transfer::provider_hooks(&artifact.exports, &self.config.providers_dir, dir, true)?;
+            transfer::provider_hooks(
+                &artifact.exports,
+                &self.config.providers_dir,
+                dir,
+                true,
+                replace,
+            )?;
             if let Some(unit) = &target.restore {
                 eprintln!("{name}: running {unit}");
                 systemd::load(&artifact.units)?;
@@ -840,11 +939,11 @@ impl Manager {
         };
         let result = run();
         if result.is_err() {
-            // Verified empty above, so this only drops what was just extracted.
+            // Only drops what was just extracted.
             for folder in &target.folders {
                 transfer::clear_dir(&transfer::real_path(folder));
             }
-            let _ = systemd::switch(&artifact.units, previous);
+            let _ = systemd::stop(&artifact.units);
         }
         result
     }
@@ -857,6 +956,12 @@ impl Manager {
         let _locks = self.locks(name, !opts.no_wait, "update")?;
         let state_path = self.state_path(name);
         let mut st = State::load(&state_path)?;
+        // Import is how a failed import is retried.
+        if let (Some(d), None) = (&st.disabled, &opts.restore_from) {
+            return Ok(UpdateOutcome::Disabled {
+                reason: d.reason.clone(),
+            });
+        }
         st.origin = origin;
         st.override_flake = opts.flake.clone();
 
@@ -948,13 +1053,11 @@ impl Manager {
         read_contents(name, &mut artifact)?;
         self.check_conflicts(name, &artifact)?;
 
-        let current = self.current(name, st)?;
+        let mut current = self.current(name, st)?;
         if let Some(dir) = &opts.restore_from {
-            let previous = current
-                .as_ref()
-                .map(|m| m.units.clone())
-                .unwrap_or_default();
-            self.restore(name, &previous, &artifact, dir)?;
+            self.restore(name, st, &artifact, dir, opts.replace)?;
+            // State was replaced, nothing to roll back to.
+            current = None;
         } else if !opts.force && current.as_ref().is_some_and(|m| m.artifact == artifact.out) {
             st.degraded = false;
             st.last_error = None;
@@ -1078,6 +1181,7 @@ impl Manager {
 
         st.generation = Some(generation);
         st.hold = None;
+        st.disabled = None;
         st.degraded = false;
         st.last_error = None;
         gens.prune(svc.keep_generations, Some(generation))?;
@@ -1352,6 +1456,36 @@ mod tests {
         assert_eq!(mgr.reconcile().unwrap(), vec!["gone".to_string()]);
         assert!(mgr.state_path("man").exists());
         assert!(!mgr.service_dir("gone").exists());
+    }
+
+    #[test]
+    fn disabled_entries_are_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager(tmp.path());
+        let svc = ServiceConfig {
+            flake: "github:me/web".into(),
+            ..Default::default()
+        };
+        write_json_atomic(&mgr.manual_config_path("web"), &svc).unwrap();
+        mgr.disable("web", "maintenance").unwrap();
+        let st = State::load(&mgr.state_path("web")).unwrap();
+        assert_eq!(st.disabled.as_ref().unwrap().by, DisabledBy::Operator);
+
+        let outcome = mgr.update("web", UpdateOpts::default()).unwrap();
+        assert_eq!(
+            outcome,
+            UpdateOutcome::Disabled {
+                reason: "maintenance".into()
+            }
+        );
+        assert!(matches!(mgr.rollback("web"), Err(Error::Disabled { .. })));
+        assert!(mgr.boot().unwrap().0.is_empty());
+
+        assert_eq!(mgr.enable("web").unwrap(), None);
+        assert!(State::load(&mgr.state_path("web"))
+            .unwrap()
+            .disabled
+            .is_none());
     }
 
     #[test]

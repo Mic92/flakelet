@@ -181,6 +181,7 @@ pub fn provider_hooks(
     providers_dir: &Path,
     dir: &Path,
     restore: bool,
+    replace: bool,
 ) -> Result<()> {
     let Some(requires) = exports.get("requires").and_then(Value::as_object) else {
         return Ok(());
@@ -204,12 +205,18 @@ pub fn provider_hooks(
         write_json_atomic(&claim_file, body)?;
         let hook = if restore { &hooks.restore } else { &hooks.dump };
         eprintln!("requires.{claim}: running {}", hook.display());
-        run(
+        let env: &[(&str, &str)] = if replace {
+            &[("FLAKELET_REPLACE", "1")]
+        } else {
+            &[]
+        };
+        run_env(
             &hook.display().to_string(),
             &[
                 &claim_file.display().to_string(),
                 &sub.display().to_string(),
             ],
+            env,
         )?;
     }
     Ok(())
@@ -257,8 +264,13 @@ fn run_stdio(program: &str, args: &[&str]) -> Result<()> {
 }
 
 pub(crate) fn run(program: &str, args: &[&str]) -> Result<()> {
+    run_env(program, args, &[])
+}
+
+fn run_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<()> {
     let out = Command::new(program)
         .args(args)
+        .envs(env.iter().copied())
         .output()
         .map_err(|source| Error::Spawn {
             program: program.into(),

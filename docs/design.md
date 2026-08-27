@@ -547,12 +547,31 @@ mostly paths to secrets and certificates, and belong to the target's NixOS
 configuration or `import --settings`. The archive only names the flake
 reference and revision so a bare target can register the entry.
 
-Import pins a freshly registered entry to the exported revision so state
-is restored onto the code that wrote it, but defers to an entry the
-target already declares, because the host configuration is the source of
-truth. It refuses non-empty target folders rather than merging, and every
-check that can fail runs before any data is extracted. After extraction
-it is ordinary activation, so health probe and rollback apply unchanged.
+Import pins the entry to the exported revision, declared or not, so state
+is restored onto the code that wrote it and stays there until `unlock`.
+Flake and settings of an entry the target already declares win, because
+the host configuration is the source of truth. It never merges into existing data: target folders must be empty,
+or `--replace` empties them. Every check that can fail runs before any
+data is extracted.
+
+Moving state does not move ownership: the source still declares the
+entry and flakelet cannot edit a NixOS configuration. Systems with one
+registry above the hosts (Kubernetes, a clan inventory) do not have this
+problem; imperative ones (`portablectl detach`) delete the source as part
+of the move. flakelet does the local half of the latter with a `disabled`
+flag in state.json. A disabled entry is unlinked from systemd and skipped
+by boot and update, but keeps its generations and folders. `export` sets
+it once the archive is written, so the source cannot run next to the
+copy, and `enable` undoes it if the move is abandoned. `import` sets it
+before removing the old units and clears it on activation, so a crash or
+failed restore hook leaves folders emptied and nothing running rather
+than the previous generation on replaced state. The same flag serves
+`flakelet disable` for maintenance that must survive timers and reboots.
+
+`disabled` says *whether* an entry runs here; `hold`, `degraded` and
+`pin` say *which* generation. They are independent, which is why
+`update --force` does not clear `disabled` and why `enable` starts the
+current generation without evaluating.
 
 Backup adapters (`flakelet-borgbackup`, a clan `state` bridge) link
 `flakelet-core` and reuse the same steps with their own storage, schedule
@@ -617,3 +636,8 @@ the next one.
 - Automatic port allocation: a service asks for one tcp port, flakelet
   assigns it from a range and feeds it back through settings.
 - A web service on top of `flakelet-core` for remote deploy triggers.
+- Provider-side fencing for resources reachable from several hosts: a
+  central `flakelet-postgres` records the claiming host and refuses
+  `provision` from a second one.
+- Declarative `enable = false` per entry for standby hosts. Needs a
+  precedence rule against `flakelet enable`.

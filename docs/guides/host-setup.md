@@ -157,6 +157,8 @@ $ flakelet diff web                # what would change
 $ flakelet rollback web            # previous generation
 $ flakelet lock web                # stay on this revision until `unlock`
 $ flakelet update web --force      # retry after a failed deploy put it on hold
+$ flakelet disable web -m 'why'   # keep it stopped across updates and reboots
+$ flakelet enable web              # start it again
 $ journalctl -u flakelet-web -u web
 ```
 

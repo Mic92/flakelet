@@ -59,6 +59,7 @@ flake URL are read from that generation's manifest.
   "pin": null,                   // set by `lock`
   "hold": { "reason": "…", "artifact": "/nix/store/…-flakelet-grafana" } | null,
   "degraded": false,             // running a cached generation after an offline eval failure
+  "disabled": { "reason": "exported to hostb", "by": "export" | "operator" | "import", "since": 1767000000 } | null,
   "last_error": null
 }
 ```
@@ -66,7 +67,11 @@ flake URL are read from that generation's manifest.
 `hold` is set when a deploy was rolled back. `update` does not activate
 the held artifact again unless `--force` is given. `degraded` is set by
 `--offline-fallback` when evaluation failed on the network and the previous
-units were kept.
+units were kept. `disabled` means the entry must not run on this host:
+its units are unlinked, `boot` and `update` skip it, `rollback` and
+`diff` refuse. Set by `disable`, by `export` (unless `--copy`) and by
+`import` while it restores, cleared by `enable` or a finished import.
+`--force` does not clear it.
 
 ## manifest.json (per generation)
 

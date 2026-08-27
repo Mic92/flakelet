@@ -33,6 +33,8 @@ pub struct State {
     pub hold: Option<Hold>,
     /// Running an older cached generation because the last eval failed offline.
     pub degraded: bool,
+    /// The entry must not run on this host until `enable`.
+    pub disabled: Option<Disabled>,
     pub last_error: Option<String>,
 }
 
@@ -46,9 +48,25 @@ impl Default for State {
             override_flake: None,
             hold: None,
             degraded: false,
+            disabled: None,
             last_error: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DisabledBy {
+    Operator,
+    Export,
+    Import,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Disabled {
+    pub reason: String,
+    pub by: DisabledBy,
+    pub since: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
