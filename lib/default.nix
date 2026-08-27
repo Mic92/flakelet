@@ -185,11 +185,15 @@ let
     section "Service" (
       # exec instead of systemd's simple: a missing binary or User= then
       # fails the start job and with it the deploy.
-      { Type = "exec"; }
+      {
+        Type = "exec";
+      }
       // (def.serviceConfig or { })
-      // lib.optionalAttrs (env != { }) {
+      // {
         # toJSON escapes quotes and backslashes in values.
-        Environment = lib.mapAttrsToList (k: v: builtins.toJSON "${k}=${toValue v}") env;
+        Environment =
+          lib.mapAttrsToList (k: v: builtins.toJSON "${k}=${toValue v}") env
+          ++ lib.toList (def.serviceConfig.Environment or [ ]);
       }
     );
   adiosTypes = import "${adios}/adios/types.nix" { korora = t; };

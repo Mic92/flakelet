@@ -60,6 +60,7 @@ let
       environment.QUOTED = ''va"lue'';
       serviceConfig = {
         ExecStart = "/bin/false --port 80";
+        Environment = [ "RAW=1" ];
         DynamicUser = true;
         StateDirectory = "web web/sub alias:link";
         CacheDirectory = "web";
@@ -268,6 +269,7 @@ runCommand "flakelet-lib-test" { units = linkFarm "flakelet-lib-test-units" resu
   grep -qx 'ExecStart=/bin/false --port 80' $s
   grep -qx 'DynamicUser=true' $s
   grep -qx 'Environment="FOO=bar"' $s
+  grep -qx 'Environment=RAW=1' $s
   grep -qxF 'Environment="QUOTED=va\"lue"' $s
   grep -q '^Environment="PATH=${lib.makeBinPath [ hello ]}:.*coreutils' $s
   grep -qx 'WantedBy=multi-user.target' $s
