@@ -174,8 +174,8 @@ Usage: flakelet export <name> [-o <file>|-] [--dry-run]
 Stop all units of the service, run its <name>-dump.service and provider
 dumps, archive the StateDirectory= folders and start the units again.
 The zstd tar goes to stdout unless -o names a file. It carries the locked
-flake ref and settings but no store paths and no secrets. Progress is on
-stderr. --dry-run prints what would be exported as JSON, or why not.
+flake ref and the state, but no settings, store paths or secrets.
+Progress is on stderr. --dry-run prints what would be exported as JSON, or why not.
 
 Examples:
   flakelet export web | ssh hostb flakelet import -
@@ -188,8 +188,9 @@ Usage: flakelet import <file>|- [--name <name>] [--settings <file>] [update opti
 Build the exported service (pinned to the exported revision), restore its
 state folders and provider resources, run <name>-restore.service and
 activate. If <name> is already declared on this host that entry is used
-and --settings is ignored; otherwise a manual service is registered.
-State folders on this host must be empty.
+and --settings is ignored. Otherwise a manual service is registered with
+the settings from --settings (default: none). State folders on this host
+must be empty.
 
 Examples:
   ssh hosta flakelet export web | flakelet import -
@@ -610,7 +611,7 @@ fn run(cli: &Cli) -> Result<bool> {
             println!("{name}: rolled back to generation {generation}");
         }
         Cmd::Export { name, out: None } => {
-            let (meta, _, _) = mgr.export_meta(name)?;
+            let (meta, _) = mgr.export_meta(name)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&meta).expect("meta is serializable")

@@ -21,6 +21,9 @@ pub struct ExportMeta {
     pub name: String,
     pub source_host: String,
     pub created: u64,
+    /// Unlocked ref and output, enough to register the entry elsewhere.
+    pub flake: String,
+    pub output: String,
     pub flake_url: String,
     pub flake_rev: String,
     pub settings_hash: String,
@@ -150,7 +153,6 @@ pub fn pack(dir: &Path, out: &Path) -> Result<()> {
             "-cf",
             &out.display().to_string(),
             "meta.json",
-            "service.json",
             "state",
             "requires",
         ],

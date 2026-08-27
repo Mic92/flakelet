@@ -542,9 +542,10 @@ mid-copy. Snapshots are a follow-up, and the archive records
 
 No store paths travel, because the target can build them, and no secret
 contents, because the archive would otherwise need the same protection as
-the secrets. Settings do travel so a bare target can reproduce the
-service. Host-specific paths in them fail the usual existence check on the
-target, and `import --settings` replaces the whole set.
+the secrets. Settings do not travel either. They are host configuration,
+mostly paths to secrets and certificates, and belong to the target's NixOS
+configuration or `import --settings`. The archive only names the flake
+reference and revision so a bare target can register the entry.
 
 Import pins a freshly registered entry to the exported revision so state
 is restored onto the code that wrote it, but defers to an entry the

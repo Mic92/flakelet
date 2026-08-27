@@ -44,7 +44,7 @@ are only visible on their machine.
 | command | does |
 | ------- | ---- |
 | `export <name> [-o <file>\|-] [--dry-run]` | stop units, run `<name>-dump.service` and provider dump hooks, tar `StateDirectory=` folders, start units, write zstd tar to stdout or `<file>`. `--dry-run` prints the would-be `meta.json` or the blockers |
-| `import <file>\|- [--name <n>] [--settings <file>] [update options]` | build pinned to the exported revision, verify target folders are empty, extract, run provider restore hooks and `<name>-restore.service`, activate. Uses an existing/declared entry if present (then `--settings` is ignored), else registers a manual one. `--name` imports as a clone |
+| `import <file>\|- [--name <n>] [--settings <file>] [update options]` | build pinned to the exported revision, verify target folders are empty, extract, run provider restore hooks and `<name>-restore.service`, activate. Uses an existing/declared entry if present (then `--settings` is ignored), else registers a manual one from the archived flake ref with `--settings` (default none). `--name` imports as a clone |
 
 See [Moving a service](../guides/moving-a-service.md).
 

@@ -95,9 +95,8 @@ See [service module reference → Artifact layout](service-module.md#artifact-la
 zstd-compressed tar:
 
 ```
-meta.json          format version, source host, flake_url/rev, settings_hash,
-                   state, exports, consistency: "stopped"
-service.json       entry as on disk
+meta.json          format version, source host, flake/output, flake_url/rev,
+                   settings_hash, state, exports, consistency: "stopped"
 state/<i>.tar      one per state.folders[i], no owner info
 requires/<claim>/  provider dump output, opaque
 ```

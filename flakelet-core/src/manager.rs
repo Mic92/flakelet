@@ -633,7 +633,7 @@ impl Manager {
     }
 
     /// Describe what `export` would write. Also the exportability check.
-    pub fn export_meta(&self, name: &str) -> Result<(ExportMeta, ServiceConfig, Units)> {
+    pub fn export_meta(&self, name: &str) -> Result<(ExportMeta, Units)> {
         let (svc, _) = self.service(name)?;
         let st = State::load(&self.state_path(name))?;
         let current = self.current(name, &st)?;
@@ -652,6 +652,8 @@ impl Manager {
             name: name.into(),
             source_host: transfer::hostname(),
             created: unix_time(),
+            flake: svc.flake,
+            output: svc.output,
             flake_url: manifest.flake_url,
             flake_rev: manifest.flake_rev,
             settings_hash: manifest.settings_hash,
@@ -659,19 +661,18 @@ impl Manager {
             exports: manifest.exports,
             consistency: "stopped".into(),
         };
-        Ok((meta, svc, manifest.units))
+        Ok((meta, manifest.units))
     }
 
     /// Stop the service, collect its state into `out`, start it again.
     pub fn export(&self, name: &str, out: &Path) -> Result<ExportMeta> {
         let _locks = self.locks(name, true, "export")?;
-        let (meta, svc, units) = self.export_meta(name)?;
+        let (meta, units) = self.export_meta(name)?;
         fs::create_dir_all(&self.config.cache_dir).map_err(Error::io("create cache dir"))?;
         let work =
             tempfile::tempdir_in(&self.config.cache_dir).map_err(Error::io("create export dir"))?;
         let dir = work.path();
         write_json_atomic(&dir.join("meta.json"), &meta)?;
-        write_json_atomic(&dir.join("service.json"), &svc)?;
         for d in ["state", "requires"] {
             fs::create_dir(dir.join(d)).map_err(Error::io("create export dir"))?;
         }
@@ -704,8 +705,8 @@ impl Manager {
     }
 
     /// Register (if needed), build, restore state from an export archive
-    /// and activate. `settings` replaces the archived settings for a new
-    /// manual entry. An existing entry keeps its own.
+    /// and activate. `settings` are for a newly registered manual entry.
+    /// An existing entry keeps its own.
     pub fn import(
         &self,
         archive: &Path,
@@ -728,10 +729,11 @@ impl Manager {
 
         let fresh = self.service(&name).is_err();
         if fresh {
-            let path = work.path().join("service.json");
-            let data = fs::read_to_string(&path).map_err(Error::io("read service.json"))?;
-            let mut svc: ServiceConfig =
-                serde_json::from_str(&data).map_err(Error::json("corrupt service.json"))?;
+            let mut svc = ServiceConfig {
+                flake: meta.flake.clone(),
+                output: meta.output.clone(),
+                ..ServiceConfig::default()
+            };
             if let Some(s) = settings {
                 svc.settings = s;
             }

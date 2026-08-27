@@ -21,7 +21,8 @@ it runs `web-restore.service` and activates the service, health probe
 included.
 
 If hostb's NixOS configuration already declares `web`, that entry and its
-settings are used. Otherwise a manual entry is registered from the archive.
+settings are used. Otherwise a manual entry is registered from the flake
+reference in the archive.
 
 ## Check first
 
@@ -34,10 +35,9 @@ exported.
 
 ## Settings on the target
 
-If hostb declares `web` in its NixOS configuration, those settings are
-used. Otherwise the settings from the archive are used as-is. They may
-contain paths to secrets or certificates that only exist on hosta. Pass a
-complete replacement in that case:
+Settings do not travel. They are host configuration and usually name
+secrets or certificates that only exist on hosta. If hostb declares `web`
+in its NixOS configuration, those settings are used. Otherwise pass them:
 
 ```console
 hostb$ cat web.json
@@ -52,8 +52,8 @@ hosta$ flakelet export web -o web.flakelet.tar.zst
 hostb$ flakelet import web.flakelet.tar.zst
 ```
 
-The archive holds no store paths and no secret contents. It does hold the
-settings and the state, so treat it accordingly.
+The archive holds no settings, store paths or secret contents. It does
+hold the service's state, so treat it accordingly.
 
 ## Cloning under another name
 
