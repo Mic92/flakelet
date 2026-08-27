@@ -717,9 +717,21 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
             mark
         );
         if let Some(err) = s.held.as_deref().or(s.last_error.as_deref()) {
-            let mut lines = err.lines().map(str::trim);
-            let line = lines.clone().rfind(|l| l.contains("error:"));
-            let line = line.or_else(|| lines.next()).unwrap_or(err);
+            let lines: Vec<&str> = err
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            let i = lines
+                .iter()
+                .rposition(|l| l.contains("error:"))
+                .unwrap_or(0);
+            let mut line = lines.get(i).copied().unwrap_or(err).to_string();
+            if line.ends_with(':') {
+                if let Some(next) = lines.get(i + 1) {
+                    line = format!("{line} {next}");
+                }
+            }
             println!("\tlast error: {line}");
         }
         if !s.failed_units.is_empty() {
