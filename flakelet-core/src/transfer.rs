@@ -28,8 +28,6 @@ pub struct ExportMeta {
     pub exports: Value,
     /// How the folders were made consistent. Only "stopped" so far.
     pub consistency: String,
-    /// Settings keys (dotted) whose values were host paths on the source.
-    pub path_settings: Vec<String>,
 }
 
 impl ExportMeta {
@@ -48,30 +46,6 @@ impl ExportMeta {
         }
         Ok(meta)
     }
-}
-
-pub fn path_settings(settings: &Value) -> Vec<String> {
-    fn walk(prefix: &str, v: &Value, out: &mut Vec<String>) {
-        match v {
-            Value::String(s) if s.starts_with('/') && !s.starts_with("/nix/store/") => {
-                out.push(prefix.to_string())
-            }
-            Value::Object(o) => {
-                for (k, v) in o {
-                    let key = if prefix.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{prefix}.{k}")
-                    };
-                    walk(&key, v, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    walk("", settings, &mut out);
-    out
 }
 
 /// Where the data of a folder really lives: DynamicUser= state sits under
@@ -293,15 +267,6 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn path_settings_are_dotted_keys() {
-        let s = serde_json::json!({
-            "port": 1, "cert": "/run/secrets/c", "pkg": "/nix/store/x",
-            "smtp": { "passwordFile": "/run/s" }
-        });
-        assert_eq!(path_settings(&s), ["cert", "smtp.passwordFile"]);
-    }
 
     #[test]
     fn dynamic_folders_live_in_private() {

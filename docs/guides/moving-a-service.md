@@ -32,19 +32,18 @@ hosta$ flakelet export web --dry-run | jq
 This prints what would be exported, or why the service cannot be
 exported.
 
-## Settings with host paths
+## Settings on the target
 
-Settings travel in the archive, but paths to secrets or certificates are
-host-specific. `--dry-run` lists them under `path_settings`. Supply
-replacements on import:
+If hostb declares `web` in its NixOS configuration, those settings are
+used. Otherwise the settings from the archive are used as-is. They may
+contain paths to secrets or certificates that only exist on hosta. Pass a
+complete replacement in that case:
 
 ```console
 hostb$ cat web.json
-{ "tlsCert": "/run/secrets/web-cert", "tokenFile": "/run/secrets/web-token" }
+{ "port": 8080, "tlsCert": "/run/secrets/web-cert" }
 hostb$ flakelet import web.flakelet.tar.zst --settings web.json
 ```
-
-`--settings` is ignored when hostb declares `web` itself.
 
 ## To a file
 
