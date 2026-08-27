@@ -1,5 +1,9 @@
 # flakelet — Design
 
+This document explains why flakelet works the way it does. How to use it
+is in the [guides](guides/), exact formats and options are in the
+[reference](reference/).
+
 flakelet runs native systemd services from Nix flakes. The idea is borrowed
 from `virtualisation.oci-containers`: the host configuration only names the
 thing to run and the settings to run it with, and the machine itself takes
@@ -41,57 +45,32 @@ The moving parts are deliberately few:
 
 ## Service contract
 
-A service flake exports a function under `flakelets.<attr>`. Here is a
-complete example using adios for typed settings:
+The shape is documented in the
+[service module reference](reference/service-module.md); here are the
+reasons behind it.
 
-```nix
-{
-  outputs = _: {
-    # `name` is the host-side entry name; deriving units and state dirs from
-    # it makes the flakelet multi-instance capable.
-    flakelets.default = { types, ... }: {
-      options = {
-        port    = { type = types.number; default = 3000; };
-        tlsCert = { type = types.option types.string; };
-      };
-      impl = { options, pkgs, name, ... }: {
-        services.${name} = {
-          wantedBy = [ "multi-user.target" ];
-          serviceConfig = {
-            ExecStart = "${pkgs.myservice}/bin/serve --port ${toString options.port}";
-            DynamicUser = true;
-            StateDirectory = name;
-          };
-        };
-      };
-    };
-  };
-}
-```
+`impl` is dependency-injected and service flakes have no inputs. The host
+decides which nixpkgs a service is built against, so a host upgrade
+delivers security fixes to every service without their authors doing
+anything, and one evaluation of nixpkgs is shared by the whole batch.
+Everything a service needs beyond `pkgs` must therefore be injectable,
+which is why `contracts`, `storePath` and `extraModules` are arguments
+rather than libraries to import.
 
-`impl` is dependency-injected. It receives the checked `options`, the
-host's `pkgs`, which is one nixpkgs instance shared between all services of
-a batch, the entry `name` chosen by the host configuration, the `settings`
-from the host, and any helper modules the host wants to hand out through
-`services.flakelets.extraModules`. Because the service derives its unit names
-and state directory from `name`, the same flake can be instantiated several
-times on one machine under different names, each with its own settings,
-state, generations, pin and timer.
+Unit names and directories derive from the injected `name` rather than
+being fixed by the flake, so the same flake can be instantiated several
+times on one machine, each instance with its own settings, state,
+generations, pin and timer.
 
-Settings are validated by the adios/korora types the service declares. A type
-error aborts the update before anything is built, which means the currently
-running generation simply stays active and the operator sees the error in the
-journal and in `flakelet status`.
+Settings are type-checked before `impl` runs and unknown keys in the
+returned unit tree are hard errors. Both exist for the same reason: a
+typo must fail the update loudly while the running generation stays
+active, instead of producing a unit without `ExecStart=` that only fails
+at start time.
 
-The value an output attribute holds may be a single flakelet module or an
-attrset of them. Each module returns up to two things:
-
-- `services`, `sockets`, `timers`, `targets`, `paths`: NixOS-style unit
-  definitions that `flakelet.lib` renders into plain systemd unit files
-  referencing store paths directly; the settings are baked into them at
-  evaluation time.
-- `exports` (optional): metadata about what the service provides, described
-  in its own section below.
+The interface mirrors NixOS' `systemd.services` so existing modules port
+by copy and paste, but it renders to plain unit files with settings baked
+in. There is no module system fixpoint and nothing to merge with the host.
 
 All units of one entry form one generation. They are activated together and
 rolled back together, so a service consisting of a `.service` and a `.socket`
@@ -111,52 +90,43 @@ hardening come from ordinary unit directives such as `DynamicUser=`,
 host, dependencies that the host already has are not downloaded or stored a
 second time.
 
-### Health checks
+### Health checks are units
 
-Health lives in the units, not in a flakelet-owned mechanism. systemd
-already supervises starts with timeouts, journal logging and sandboxing.
+An earlier version ran a `healthCheck` executable from flakelet itself.
+That re-implemented systemd poorly: hand-rolled privilege dropping, no
+timeout (a hanging probe held the service lock forever), no journal, and
+it only ran when flakelet activated something. Making the probe a
+`<name>-health.service` oneshot gets `TimeoutStartSec=`, sandboxing,
+journal and `systemctl start` for free, and because it is part of the
+generation it is gc-rooted and rolled back together with the code it
+probes. Readiness and liveness stay where systemd already handles them:
+the start job and `Restart=`/`WatchdogSec=`.
 
-Readiness belongs in the service unit. `Type=notify` or an `ExecStartPost=`
-probe makes the start job fail when the service does not come up. A failed
-start job rolls the activation back. Liveness after activation is
-systemd's job too, via `Restart=` and `WatchdogSec=`.
+The probe is shipped by the service rather than configured on the host,
+because the service knows best how to probe itself. The `healthCheck`
+sugar runs it with the main unit's identity so it can reach `0660`
+sockets and read-only self-tests work without spelling the unit out; a
+service that wants a black-box probe from an unrelated user writes
+`services.health` explicitly.
 
-For a deeper probe the service ships a `<name>-health.service` oneshot
-(sugar: `healthCheck`). flakelet starts it after every activation. A
-non-zero result triggers the rollback. The sugar runs the probe as the main
-unit's user with `TimeoutStartSec=1min`.
+### State is derived, not declared
 
-The probe is a normal unit of the generation. It is gc-rooted with it and a
-rollback rolls back to the matching probe. `TimeoutStartSec=` bounds it.
-Retries are ordinary options of the probe command. An operator can run it
-by hand with `systemctl start <name>-health`.
+A separate state declaration would duplicate what `StateDirectory=` and
+`User=`/`DynamicUser=` already say and could drift from it. So
+`flakelet.lib` derives the folder list and owners from the structured
+`serviceConfig` at evaluation time and writes `state.json` into the
+artifact. Core never parses unit files, a CI build sees exactly what the
+machine will see, and the folder list of a generation is known before any
+data is touched. `CacheDirectory=` and friends are excluded because
+systemd's own semantics say they are disposable.
 
-The check is shipped by the service rather than configured on the host,
-because the service knows best how to probe itself.
-
-### State
-
-Persistent state follows the same idea: the unit files already say where
-it lives. `StateDirectory=` is what `flakelet export` carries to another
-machine. `CacheDirectory=`, `RuntimeDirectory=` and `LogsDirectory=` are
-not carried. `User=`/`DynamicUser=` tell the importing side who must own
-it.
-
-`flakelet.lib` reads these from the structured `services.*.serviceConfig`
-at evaluation time and writes a `state.json` into the artifact. Core never
-parses unit files, and a CI build sees the same description.
-
-A service that needs to serialise something before its folders are copied
-ships a `<name>-dump.service` oneshot (sugar: `dumpScript`). One that needs
-to load it afterwards ships a `<name>-restore.service` (`restoreScript`).
-Like `healthCheck`, both sugars run as the main unit's user with its
-`StateDirectory=`. They run while the other units are stopped and must not
-read or write outside those folders.
-
-State outside the directives is listed in `exports.state.extraFolders`.
-That requires a static `User=`, because a dynamic uid cannot own paths
-outside `/var/lib`. The full transfer procedure is described under
-"Export and import" below.
+Dump and restore hooks are units for the same reasons the health probe
+is. They run with the main unit's identity because their job is to read
+and write its state, and they require a `StateDirectory=` because without
+one they would have nowhere sandbox-safe to put their output.
+`extraFolders` demands a static `User=` because ownership of paths
+outside `/var/lib` cannot be fixed up by systemd on start the way
+`StateDirectory=` is.
 
 ### Activation of native units
 
@@ -251,86 +221,29 @@ in pure evaluation), making the artifact really depend on it.
 
 ## Files on the machine
 
-flakelet keeps its state in a handful of JSON files. They are all plain
-files, so an operator can read them with `jq` when something looks odd.
+The formats are in the [files reference](reference/files.md). The design
+choices:
 
-`/etc/flakelet/config.json` is rendered by the NixOS module. It is
-world-readable and therefore contains no secrets. Declarative services live
-here with their settings inline:
+Everything is plain JSON so an operator can debug with `jq`. config.json
+is world-readable, which forces secrets out of settings and into paths.
+Credentials for private flakes are file paths too, resolved at runtime by
+the eval user, so they compose with sops-nix, clan vars or agenix and
+access tokens go through `NIX_CONFIG` rather than a command line visible
+in `ps`. Manual services live in their own `service.json` so they survive
+host rebuilds that know nothing about them.
 
-```jsonc
-{
-  "eval_user": "flakelet",
-  "cache_dir": "/var/cache/flakelet",
-  "state_dir": "/var/lib/flakelet",
-  "gcroot_dir": "/nix/var/nix/gcroots/flakelet",
-  "nixpkgs": "/nix/store/…-source",
-  "adios": "/nix/store/…-adios-source",
-  "extra_modules": ["/nix/store/…-mycorp-lib.nix"],
-  "eval": { "workers": 1, "max_memory_mb": null },   // null = derive from available RAM
-  "credentials": {                                    // all optional, all file paths
-    "netrc_file": "/run/secrets/flakelet-netrc",
-    "access_tokens_file": "/run/secrets/flakelet-access-tokens",  // "github.com=ghp_…" per line
-    "ssh_key_file": "/run/secrets/flakelet-ssh-key",
-    "ssh_known_hosts_file": "/etc/ssh/ssh_known_hosts"
-  },
-  "services": {
-    "grafana": {
-      "flake": "github:me/grafana-svc",
-      "output": "flakelets.default",
-      "settings": { "port": 3000, "tlsCert": "/run/secrets/grafana-tls" },
-      "input_overrides": { "nixpkgs": "github:NixOS/nixpkgs/nixos-25.05" },
-      "keep_generations": 5,
-      "credentials": null                  // optional per-service override of the global block
-    }
-  }
-}
-```
+Generation directories under the gcroots are the single mechanism behind
+rollback, gc and multi-unit atomicity; there is no database to fall out of
+sync with them. `/run/flakelet/exports` is re-published on activation,
+boot and removal so consumers never read metadata of a generation that is
+not running. Files carry a version; flakelet migrates old ones and refuses
+newer ones, because guessing about an unknown format is how state gets
+destroyed. Corrupt state makes mutating commands demand `--force`, which
+rebuilds from the newest intact generation.
 
-### Fetch credentials for private flakes
+### The service artifact
 
-Private repositories need credentials at resolution and fetch time, and those
-credentials have to be available at runtime on the machine, not just when the
-host configuration is built. The `credentials` block solves this with plain
-file paths, so it composes with whatever secrets tool the host already uses,
-be it sops-nix, clan vars or agenix. The referenced files must be readable by
-the `flakelet` eval user, since that is who runs the fetching. The
-credentials are applied to every nix invocation flakelet makes: metadata,
-archive, evaluation and build.
-
-- `netrc_file` is passed to nix as the `netrc-file` option and covers https
-  fetches.
-- `access_tokens_file` contains `host=token` lines. flakelet reads it and
-  passes the tokens through the `NIX_CONFIG` environment variable, so they
-  never show up on a command line or in `ps` output.
-- `ssh_key_file` and `ssh_known_hosts_file` are combined into a
-  `GIT_SSH_COMMAND` with `IdentitiesOnly` and strict host key checking, which
-  covers `git+ssh` flake references.
-
-A missing credential file is reported the same way as a dangling settings
-path: the update fails early with a clear message. A per-service
-`credentials` block overrides the global one, for the case where one service
-needs a different identity than the rest of the machine.
-
-`/var/lib/flakelet/<name>/service.json` holds a manually deployed service,
-created by `flakelet deploy`. Its content is one entry of `services.<name>`
-from the config above, with the settings from `--settings` stored inline.
-Keeping manual services in their own files means they survive host rebuilds
-that know nothing about them.
-
-### The service artifact, a self-describing build result
-
-The driver builds exactly one store path per service, and that artifact is
-what the rest of the system operates on:
-
-```
-/nix/store/…-flakelet-<name>/
-  meta.json      # schema version, name, flake_url + rev, settings hash
-  units/…        # unit files (settings baked in)
-  exports.json   # optional (drvs replaced by out paths)
-  state.json     # derived folders, owners, dump/restore unit names
-```
-
+The driver builds exactly one self-describing store path per service.
 Structuring the output this way splits every update into two halves that can
 be performed independently. The first half produces the artifact, normally by
 evaluating the driver on the machine. The second half activates it: gc-root
@@ -342,56 +255,6 @@ instead of `flake` and `settings`; the two are mutually exclusive. This is
 how CI-primed deployments and tests avoid running any evaluation on the
 target machine, while `meta.json` keeps the provenance visible in
 `flakelet status`.
-
-`/var/lib/flakelet/<name>/state.json` records what is currently deployed. It
-is written atomically via a temporary file and rename:
-
-```jsonc
-{
-  "origin": "declarative" | "manual",
-  "generation": 4,                          // null if never deployed
-  "units": { "grafana.service": "/nix/store/…-grafana.service" },
-  "locked_url": "github:me/grafana-svc/<rev>",
-  "pin": null,                              // set by `flakelet lock`
-  "hold": { "reason": "…", "settings_hash": "sha256-…", "flake_rev": "<rev>" },
-  "degraded": false,                        // cached generation after offline eval failure
-  "last_error": null
-}
-```
-
-`/nix/var/nix/gcroots/flakelet/<name>/gen-<N>/` contains the `root-*` gcroot
-symlinks and a `manifest.json` describing that generation:
-
-```jsonc
-{
-  "units": { "grafana.service": "/nix/store/…-grafana.service" },
-  "flake_url": "github:me/grafana-svc/<rev>?narHash=…",
-  "flake_rev": "<rev>",
-  "settings_hash": "sha256-…",
-  "driver": "/nix/store/…-flakelet-driver.nix",
-  "exports": { "metrics": [] },                // derivations replaced by out paths
-  "state": { "folders": [ { "path": "/var/lib/grafana", "user": "grafana", "group": "grafana", "dynamic": true } ],
-             "dump": null, "restore": null },
-  "created": 1767000000
-}
-```
-
-`/run/flakelet/exports/<name>.json` holds the exports of the currently active
-generation. It is re-published on every activation, at boot and on removal,
-so consumers never read metadata that belongs to a generation which is no
-longer running.
-
-Generation directories are the single mechanism behind rollback, garbage
-collection and multi-unit atomicity. There is no separate database to fall
-out of sync with them. The default retention is `keep_generations = 5`.
-
-All of these files carry a `"version": 1` field. flakelet reads older
-versions and migrates them on the next write, and refuses to touch files
-written by a newer flakelet, because guessing about an unknown format is how
-state gets destroyed. If a state.json or manifest.json is corrupt or
-truncated, read-only commands treat the service as never deployed, and
-mutating commands refuse to run unless given `--force`, which rebuilds the
-state from the newest intact generation directory.
 
 ## Declarative and manual services
 
@@ -500,16 +363,8 @@ directory behind, which the next update or gc removes.
 ## Checking and CI across machines
 
 Everything up to activation works without being root and without touching
-state, so the same code path can run on a developer laptop or in CI:
-
-```
-flakelet check  --machine eve [foo…]      # eval only
-flakelet check  --build --machine eve     # additionally build the units/closures
-flakelet build  --machine eve foo         # out-links in the current directory
-flakelet driver --machine eve foo         # print the driver expression
-flakelet check  --config <config.json>    # any rendered config (CI)
-```
-
+state, so the same code path can run on a developer laptop or in CI
+(`flakelet check`/`build`/`driver`, see the [CLI reference](reference/cli.md)).
 `--machine <name>` builds
 `nixosConfigurations.<name>.config.services.flakelets.configFile` from a
 flake, defaulting to the flake in the current directory, and feeds that
@@ -520,26 +375,6 @@ these commands as flake checks lets a build farm evaluate and build the
 flakelets of every machine and prime the binary cache, so the machines
 themselves only download. Manual services can only be checked on their
 machine, because only that machine knows about them.
-
-## CLI
-
-```
-flakelet update [--force] [--no-wait] [<name>…]
-flakelet check [--build] [--machine <m> | --config <file>] [<name>…]
-flakelet build [--machine <m> | --config <file>] <name>…
-flakelet driver [--machine <m>] [<name>…]
-flakelet deploy <name> --flake <ref> [--settings <file>] […]
-flakelet activate <name> <store path>
-flakelet remove [--purge] <name>
-flakelet reconcile
-flakelet status [--json]
-flakelet rollback <name>
-flakelet export <name> [-o <file>|-] [--dry-run]
-flakelet import <file>|- [--name <n>] [--settings <file>]
-flakelet diff <name>            # nix store diff-closures current vs. new eval
-flakelet lock <name> / unlock <name>
-flakelet gc [--keep N]
-```
 
 ## Crates
 
@@ -577,21 +412,7 @@ portable.
 
 ### NixOS module
 
-```nix
-services.flakelets.extraModules = [ ./mycorp-lib.nix ];
-services.flakelets.services.<name> = {
-  flake = "github:me/foo";
-  output = "flakelets.default";
-  settings = { ... };
-  inputOverrides = { };
-  autoUpdate = { enable = false; interval = "daily"; randomizedDelay = "1h"; };
-  keepGenerations = 5;
-};
-services.flakelets.eval = { workers = 1; maxMemoryMb = null; };
-services.flakelets.credentials = { netrcFile = null; accessTokensFile = null;
-                                   sshKeyFile = null; sshKnownHostsFile = null; };
-```
-
+Options are listed in the [host options reference](reference/host-options.md).
 The module creates the `flakelet` user together with `/var/cache/flakelet`
 and `/var/lib/flakelet`, installs `flakelet-boot.service` and renders
 config.json. The nixpkgs and adios store paths written into the config come
@@ -626,27 +447,13 @@ derivations inside the exports are built, gc-rooted with the generation and
 replaced by their output paths, so a consumer that executes a hook from the
 exports always runs code matching the generation that is actually running.
 
-A few schemas are blessed so consumers can rely on their shape. The service
-declares what it provides; policy questions such as zones, public host names,
-TLS and who may reach the service stay on the host side, in the consumers:
-
-- `exports.metrics = [ { port; path ? "/metrics"; scheme ? "http"; } ]`
-  announces Prometheus-style metrics endpoints.
-- `exports.ports.<name> = { port | { from; to; }; protocol ? "tcp";
-  internal ? false; }` describes non-HTTP listeners. flakelet refuses to
-  activate a service whose port claims collide with those of another managed
-  service, because two daemons fighting over one port is better caught before
-  either of them is restarted. A service that wants the host to own the
-  listening socket ships a `.socket` unit instead of an export.
-- `exports.http.<name> = { host; upstream; paths ? [ "/" ];
-  websockets ? false; …hints }` is a webserver-agnostic reverse-proxy
-  declaration. Unix-socket upstreams via `RuntimeDirectory=` are preferred
-  over localhost ports: they cannot collide and they compose with
-  `DynamicUser=`. A service that is only reachable through the proxy needs no
-  `exports.ports` entry at all.
-- `exports.state = { extraFolders = [ … ]; }` only names state the unit
-  directives cannot express (see the service contract above). Like `ports`
-  it is interpreted by core and has no schema file.
+A few schemas are blessed (listed in the
+[contracts reference](reference/contracts.md)) so consumers can rely on
+their shape. The service declares what it provides; policy questions such
+as zones, public host names, TLS and who may reach the service stay on the
+host side, in the consumers. `ports` is the one export core acts on: two
+daemons fighting over one port is better caught before either of them is
+restarted, so colliding claims refuse activation.
 
 flakelet only publishes this data. The consumers are separate projects:
 Prometheus file_sd, telegraf or Alloy rendering for metrics, nftables sets or
@@ -764,48 +571,31 @@ repositories, named for what they wrap (`flakelet-nginx`,
 
 ## Export and import
 
-`flakelet export <name>` moves a running service's state off the machine,
-`flakelet import` brings it up elsewhere. Both need nothing from the
-service author in the common case, because folders, owners and provider
-claims are already known (see the service contract and `state.json`).
+Usage is in the [guide](guides/moving-a-service.md), the archive format in
+the [files reference](reference/files.md#export-archive). The decisions:
 
-Export takes the service lock, stops all units of the entry in one
-`systemctl stop` so timers and sockets cannot re-trigger it, runs
-`<name>-dump.service` if present, calls each `requires.*` provider's
-`dump`, tars every state folder, starts the units again and streams a zstd
-tar to stdout (or `-o <file>`):
+Both need nothing from the service author in the common case, because
+folders, owners and provider claims are already derived per generation.
+Consistency comes from stopping all units of the entry in one
+`systemctl stop`, so timers and sockets cannot re-trigger the service
+mid-copy; snapshots are a follow-up, and the archive records
+`consistency: "stopped"` to leave room for that.
 
-```
-meta.json        # format version, source host, flake_url/rev, settings_hash,
-                 # state, exports, consistency: "stopped", path_settings
-service.json     # the entry as on disk: flake, output, settings, …
-state/<i>.tar    # one per state folder, in state.folders order, no owners
-requires/<claim>/…   # provider dump output, opaque
-```
+No store paths travel, because the target can build them, and no secret
+contents, because the archive would otherwise need the same protection as
+the secrets. Settings do travel so a bare target can reproduce the
+service, with host-specific paths listed for replacement rather than
+silently reused.
 
-No store paths and no secret contents travel. Settings do, but are not
-portable as-is since they carry host paths to secrets and certificates;
-`path_settings` lists those keys and `import --settings` replaces them.
-`export --dry-run` prints `meta.json` or the reasons the service cannot be
-exported: never deployed, degraded, a generation without `state.json`
-(prebuilt or built by an older flakelet), or a `requires.*` claim whose
-provider has no `state` hooks. `status --json` carries the same list as
-`export_blockers`.
-
-Import reads the archive from a file or stdin. If no entry of that name
-exists it registers a manual one from `service.json`, pinned to the
-exported revision so the state is restored onto the code that wrote it; a
-declared or existing entry is used as is, which is the normal case when the
-target's NixOS configuration already lists the service. Before building it
-checks from `meta.json` that the state folders here are absent or empty,
-static users exist and every claim has a provider with `restore`. It then
-builds without starting, compares the evaluated `state.json` with the
-archive (folder count, dump/restore presence, claims), stops any running
-units, extracts the folders, runs the provider `restore` hooks and
-`<name>-restore.service`, and activates normally, health probe included. A
-failed import of a fresh entry removes the registration again. `--name`
-imports under another name; units and directories derive from `name`, so
-that is a clone, also on the same host.
+Import pins a freshly registered entry to the exported revision so state
+is restored onto the code that wrote it, but defers to an entry the
+target already declares, because that is the normal migration case and
+the host configuration is the source of truth. It refuses non-empty
+target folders rather than merging, checks users and providers before
+building, and compares the evaluated `state.json` with the archive before
+extracting, so a mismatch is caught before any data lands. Everything
+after extraction is ordinary activation, so the health probe and rollback
+apply unchanged.
 
 Backup adapters (`flakelet-borgbackup`, a clan `state` bridge) link
 `flakelet-core` and reuse the same steps with their own storage, schedule
