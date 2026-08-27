@@ -75,6 +75,9 @@
         vm = nixpkgs.legacyPackages.${system}.testers.runNixOSTest (
           import ./tests/vm.nix { flakeletModule = self.nixosModules.flakelet; }
         );
+        vm-transfer = nixpkgs.legacyPackages.${system}.testers.runNixOSTest (
+          import ./tests/vm-transfer.nix { flakeletModule = self.nixosModules.flakelet; }
+        );
       });
     };
 }

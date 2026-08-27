@@ -5,6 +5,7 @@ use flakelet_core::{CheckOpts, Manager, Result, UpdateOpts, UpdateOutcome};
 use lexopt::prelude::*;
 use serde_json::Value;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -33,6 +34,10 @@ Commands:
                         Show service status
   diff <name>           Closure diff between the running generation and a fresh evaluation
   rollback <name>       Switch back to the previous generation
+  export <name> [-o <file>|-] [--dry-run]
+                        Stop the service and archive its state for another machine
+  import <file>|- [--name <name>] [--settings <file>] [update options]
+                        Restore an exported service and start it
   lock <name>           Pin a service to the currently resolved flake revision
   unlock <name>         Remove the pin
   gc [--keep <n>]       Prune old generations
@@ -161,6 +166,33 @@ Closure diff between the running generation and a fresh evaluation.
 Example:
   flakelet diff web
 ",
+        "export" => "\
+Usage: flakelet export <name> [-o <file>|-] [--dry-run]
+
+Stop all units of the service, run its <name>-dump.service and provider
+dumps, archive the StateDirectory= folders and start the units again.
+The zstd tar goes to stdout unless -o names a file. It carries the locked
+flake ref and settings but no store paths and no secrets. Progress is on
+stderr. --dry-run prints what would be exported as JSON, or why not.
+
+Examples:
+  flakelet export web | ssh hostb flakelet import -
+  flakelet export web -o web.flakelet.tar.zst
+  flakelet export web --dry-run | jq .state
+",
+        "import" => "\
+Usage: flakelet import <file>|- [--name <name>] [--settings <file>] [update options]
+
+Build the exported service (pinned to the exported revision), restore its
+state folders and provider resources, run <name>-restore.service and
+activate. If <name> is already declared on this host that entry is used
+and --settings is ignored; otherwise a manual service is registered.
+State folders on this host must be empty.
+
+Examples:
+  ssh hosta flakelet export web | flakelet import -
+  flakelet import web.flakelet.tar.zst --name web2 --settings web2.json
+",
         "rollback" => "\
 Usage: flakelet rollback <name>
 
@@ -230,6 +262,16 @@ enum Cmd {
     },
     Rollback {
         name: String,
+    },
+    Export {
+        name: String,
+        out: Option<PathBuf>,
+    },
+    Import {
+        archive: PathBuf,
+        name: Option<String>,
+        settings: Option<Value>,
+        opts: UpdateOpts,
     },
     Lock {
         name: String,
@@ -305,6 +347,9 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut keep = None;
     let mut check = CheckOpts::default();
     let mut machine = None;
+    let mut out = None;
+    let mut dry_run = false;
+    let mut name_opt = None;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => {
@@ -324,6 +369,9 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("out-link") => check.out_links = Some(PathBuf::from(parser.value()?)),
             Long("machine") => machine = Some(parser.value()?.string()?),
             Long("keep") => keep = Some(parser.value()?.parse()?),
+            Short('o') | Long("output-file") => out = Some(PathBuf::from(parser.value()?)),
+            Long("dry-run") => dry_run = true,
+            Long("name") => name_opt = Some(parser.value()?.string()?),
             Value(v) => names.push(v.string()?),
             _ => return Err(arg.unexpected()),
         }
@@ -392,6 +440,29 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         },
         "rollback" => Cmd::Rollback {
             name: one_name(&names)?,
+        },
+        "export" => {
+            let out = (!dry_run).then(|| out.unwrap_or_else(|| "-".into()));
+            if out.as_deref() == Some(Path::new("-")) && std::io::stdout().is_terminal() {
+                return Err(
+                    "refusing to write an archive to a terminal, use -o <file> or a pipe".into(),
+                );
+            }
+            Cmd::Export {
+                name: one_name(&names)?,
+                out,
+            }
+        }
+        "import" => Cmd::Import {
+            archive: one_name(&names)
+                .map_err(|_| "expected one archive path")?
+                .into(),
+            name: name_opt,
+            settings: match settings.as_deref() {
+                Some(p) => Some(read_settings(Some(p)).map_err(|e| e.to_string())?),
+                None => None,
+            },
+            opts,
         },
         "lock" => Cmd::Lock {
             name: one_name(&names)?,
@@ -502,6 +573,31 @@ fn run(cli: &Cli) -> Result<bool> {
         Cmd::Rollback { name } => {
             let generation = mgr.rollback(name)?;
             println!("{name}: rolled back to generation {generation}");
+        }
+        Cmd::Export { name, out: None } => {
+            let (meta, _, _) = mgr.export_meta(name)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&meta).expect("meta is serializable")
+            );
+        }
+        Cmd::Export {
+            name,
+            out: Some(out),
+        } => {
+            mgr.export(name, out)?;
+            eprintln!("{name}: exported to {}", out.display());
+        }
+        Cmd::Import {
+            archive,
+            name,
+            settings,
+            opts,
+        } => {
+            let (name, outcome) =
+                mgr.import(archive, name.as_deref(), settings.clone(), opts.clone())?;
+            println!("{name}: {}", describe(&outcome));
+            return Ok(success(&outcome));
         }
         Cmd::Lock { name } => {
             let url = mgr.lock_service(name)?;

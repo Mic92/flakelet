@@ -112,6 +112,21 @@ than configured on the host, because the service knows best how to probe
 itself. Ongoing liveness after activation is systemd's job, via `Restart=`
 and `WatchdogSec=`.
 
+Persistent state follows the same idea: the unit files already say where it
+lives. `StateDirectory=` is what `flakelet export` carries to another
+machine, `CacheDirectory=`, `RuntimeDirectory=` and `LogsDirectory=` are
+not, and `User=`/`DynamicUser=` tell the importing side who must own it.
+`flakelet.lib` reads these from the structured `services.*.serviceConfig`
+at evaluation time and writes a `state.json` into the artifact, so core
+never parses unit files and a CI build sees the same description. A service
+that needs to serialise something before its folders are copied ships a
+`<name>-dump.service` oneshot (sugar: `dumpScript`), one that needs to load
+it afterwards a `<name>-restore.service` (`restoreScript`). Both run as the
+main unit's user with its `StateDirectory=` while the other units are
+stopped, and must not read or write outside those folders. State outside
+the directives is listed in `exports.state.extraFolders`, which requires a
+static `User=`.
+
 All units of one entry form one generation. They are activated together and
 rolled back together, so a service consisting of a `.service` and a `.socket`
 never ends up half-updated.
@@ -300,6 +315,7 @@ what the rest of the system operates on:
   meta.json      # schema version, name, flake_url + rev, settings hash
   units/…        # unit files (settings baked in)
   exports.json   # optional (drvs replaced by out paths)
+  state.json     # derived folders, owners, dump/restore unit names
 ```
 
 Structuring the output this way splits every update into two halves that can
@@ -340,7 +356,9 @@ symlinks and a `manifest.json` describing that generation:
   "flake_rev": "<rev>",
   "settings_hash": "sha256-…",
   "driver": "/nix/store/…-flakelet-driver.nix",
-  "exports": { "metrics": [], "state": {} },   // derivations replaced by out paths
+  "exports": { "metrics": [] },                // derivations replaced by out paths
+  "state": { "folders": [ { "path": "/var/lib/grafana", "user": "grafana", "group": "grafana", "dynamic": true } ],
+             "dump": null, "restore": null, "opaque": [] },
   "created": 1767000000
 }
 ```
@@ -503,6 +521,8 @@ flakelet remove <name>
 flakelet reconcile
 flakelet status [--json]
 flakelet rollback <name>
+flakelet export <name> [-o <file>|-] [--dry-run]
+flakelet import <file>|- [--name <n>] [--settings <file>]
 flakelet diff <name>            # nix store diff-closures current vs. new eval
 flakelet lock <name> / unlock <name>
 flakelet gc [--keep N]
@@ -611,16 +631,14 @@ TLS and who may reach the service stay on the host side, in the consumers:
   over localhost ports: they cannot collide and they compose with
   `DynamicUser=`. A service that is only reachable through the proxy needs no
   `exports.ports` entry at all.
-- `exports.state.<name> = { folders; preBackup; postBackup; preRestore;
-  postRestore; }` follows the clan model for stateful data. `folders` are
-  host paths such as the unit's `StateDirectory`. The hooks are optional
-  derivations: preBackup might dump a database, postBackup removes the dump,
-  preRestore quiesces the service and postRestore starts it again.
+- `exports.state = { extraFolders = [ … ]; }` only names state the unit
+  directives cannot express (see the service contract above). Like `ports`
+  it is interpreted by core and has no schema file.
 
 flakelet only publishes this data. The consumers are separate projects:
 Prometheus file_sd, telegraf or Alloy rendering for metrics, nftables sets or
 ufw rules for the firewall, the Caddy admin API or nginx snippets for the
-proxy, and backup adapters such as clan borgbackup for state. The health of
+proxy. Backup adapters build on the export machinery described below. The health of
 flakelet itself needs no exports; it is visible through unit state,
 `flakelet status --json` and journal MESSAGE_IDs.
 
@@ -684,7 +702,23 @@ socket for postgres. A provider may also be a flakelet itself. The rules:
   `status` when a claim has no announcer. Enforcement stays soft: a missing
   provider surfaces as a failed start, `Restart=` retries until provisioning
   catches up. First-deploy races resolve the same way, not by an ordering
-  protocol.
+  protocol. Unknown keys in the announcement are ignored.
+- A provider that can move the resource it provisions announces how:
+
+  ```json
+  { "contract": "postgres/v1",
+    "state": { "dump": "/nix/store/…/bin/dump", "restore": "/nix/store/…/bin/restore" } }
+  ```
+
+  Both are called by `flakelet export`/`import` as `<hook> <claim.json>
+  <dir>` once per `requires.<contract>` claim. What they write into `<dir>`
+  is opaque to core. `restore` must create the resource itself if it does
+  not exist yet, because on import it runs before the exports file that
+  normally triggers provisioning is published, and it refuses a non-empty
+  one, which keeps provisioning add-only. This is host tooling talking to a
+  host provider at export time, not the provider→service feedback channel
+  ruled out above. A provider without `state` makes its consumers
+  non-exportable, which `status --json` and `export --dry-run` report.
 
 Contracts inherit the version 1 trust model: services may claim any domain
 or database name, which is also what lets blue/green instances share one
@@ -695,9 +729,9 @@ grant options are the extension point; flakelet core would not change.
 Where a contract lives follows one criterion: whether services reach it
 through the injected module arguments (service flakes are input-free, so
 anything they need must be injectable) and whether core interprets it.
-`ports` is core-enforced and cannot move. Pure descriptions that are
-near-universal and multi-implementation — `http`, later `metrics` and
-`state` — are blessed here: JSON Schema in `contracts/`, constructor in
+`ports` and `state` are core-interpreted and cannot move. Pure descriptions
+that are near-universal and multi-implementation — `http`, later `metrics`
+— are blessed here: JSON Schema in `contracts/`, constructor in
 the injected `contracts`. Backing-service contracts such as `postgres` live
 in their implementation's repository (`flakelet-postgres`), because their
 hard parts — add-only provisioning, orphans, rollback interplay — are
@@ -715,6 +749,55 @@ provisioning) and must compose with an existing `services.nginx` or
 repositories, named for what they wrap (`flakelet-nginx`,
 `flakelet-postgres`); the known ones are listed in the README.
 
+## Export and import
+
+`flakelet export <name>` moves a running service's state off the machine,
+`flakelet import` brings it up elsewhere. Both need nothing from the
+service author in the common case, because folders, owners and provider
+claims are already known (see the service contract and `state.json`).
+
+Export takes the service lock, stops all units of the entry in one
+`systemctl stop` so timers and sockets cannot re-trigger it, runs
+`<name>-dump.service` if present, calls each `requires.*` provider's
+`dump`, tars every state folder, starts the units again and streams a zstd
+tar to stdout (or `-o <file>`):
+
+```
+meta.json        # format version, source host, flake_url/rev, settings_hash,
+                 # state, exports, consistency: "stopped", path_settings
+service.json     # the entry as on disk: flake, output, settings, …
+state/<i>.tar    # one per state folder, in state.folders order, no owners
+requires/<claim>/…   # provider dump output, opaque
+```
+
+No store paths and no secret contents travel. Settings do, but are not
+portable as-is since they carry host paths to secrets and certificates;
+`path_settings` lists those keys and `import --settings` replaces them.
+`export --dry-run` prints `meta.json` or the reasons the service cannot be
+exported: never deployed, degraded, a generation built before `state.json`
+existed, raw `units` without `extraFolders`, or a `requires.*` claim whose
+provider has no `state` hooks. `status --json` carries the same list as
+`export_blockers`.
+
+Import reads the archive from a file or stdin. If no entry of that name
+exists it registers a manual one from `service.json`, pinned to the
+exported revision so the state is restored onto the code that wrote it; a
+declared or existing entry is used as is, which is the normal case when the
+target's NixOS configuration already lists the service. Before building it
+checks from `meta.json` that the state folders here are absent or empty,
+static users exist and every claim has a provider with `restore`. It then
+builds without starting, compares the evaluated `state.json` with the
+archive (folder count, dump/restore presence, claims), stops any running
+units, extracts the folders, runs the provider `restore` hooks and
+`<name>-restore.service`, and activates normally, health probe included. A
+failed import of a fresh entry removes the registration again. `--name`
+imports under another name; units and directories derive from `name`, so
+that is a clone, also on the same host.
+
+Backup adapters (`flakelet-borgbackup`, a clan `state` bridge) link
+`flakelet-core` and reuse the same steps with their own storage, schedule
+and retention; they need no contract.
+
 ## Users and state ownership
 
 The default answer to "which user does my service run as" is `DynamicUser=`
@@ -727,13 +810,15 @@ the unit sets `User=` and `StateDirectory=`. Creating users at runtime
 through sysusers fragments was considered and rejected: it conflicts with
 `users.mutableUsers = false`, which many hosts set on purpose.
 
-State ownership across changes is handled by systemd itself: it chowns the
-`StateDirectory` to the unit's user on start, which covers the migration from
-a dynamic to a static user as well as importing state onto a machine where
-the uids differ. Paths outside the `StateDirectory` can fall back to an
-`ExecStartPre=+chown …` line, where the leading `+` runs that one command as
-root. The future `flakelet export` and `import` store user names rather than
-uids for the same reason.
+State ownership across changes is handled by systemd itself: it chowns (or
+id-maps) the `StateDirectory` to the unit's user on start, which covers the
+migration from a dynamic to a static user as well as importing state onto a
+machine where the uids differ. `flakelet import` therefore extracts
+`StateDirectory=` contents root-owned and lets the first start fix them;
+only `extraFolders` are chowned by core, to the static `User=`/`Group=`
+names recorded at export, which must exist on the target. Paths outside the
+`StateDirectory` can fall back to an `ExecStartPre=+chown …` line, where
+the leading `+` runs that one command as root.
 
 ## Secrets
 
@@ -764,17 +849,22 @@ pin a service to a known revision until you have reviewed the next one.
 ## Follow-ups
 
 - Shared hardening and exporter modules for `flakelet.lib`.
-- `flakelet export` and `import`. The export is an archive of the locked
-  flake URL, the settings, the exports and the declared state folders,
-  without store paths or secrets, wrapped in the preBackup and postBackup
-  hooks. Import registers a manual service, runs preRestore, restores the
-  folders and runs postRestore before starting the units. Together they cover
-  migration, cloning and disaster recovery.
+- zfs/btrfs snapshots for export and rollback: a read-only snapshot instead
+  of keeping units stopped during the copy, a state snapshot per generation
+  with `rollback --with-state` to undo schema migrations, a dataset or
+  subvolume per service, `zfs/btrfs send` as export transport, and a
+  provider hint that a filesystem snapshot of its data directory is
+  consistent. The current design keeps this open: stop → dump → copy →
+  start are separate steps, the folder list is known per generation before
+  any data is touched, the archive has one member per folder and a
+  `consistency` field, `state` in artifact and manifest is an open object,
+  flakelet never creates state directories itself, and unknown announcement
+  keys are ignored.
 - `flakelet options <name>` to render the adios option documentation of a
   service.
 - `flakelet check --override-ref` to pin revisions in pull-request CI.
-- A backup adapter consuming `exports.state`, for clan borgbackup and
-  localbackup.
+- A backup adapter on top of the export steps, for clan borgbackup and
+  localbackup; `state.{dump,restore}` in `flakelet-postgres`.
 - Contract implementations: `flakelet-nginx` and `flakelet-postgres`, plus
   firewall integrations consuming `exports.ports`.
 - Automatic port allocation: a service asks for one tcp port, flakelet

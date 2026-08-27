@@ -60,6 +60,29 @@ pub fn remove(units: &Units) -> Result<()> {
     switch(units, &Units::new())
 }
 
+/// Keeps units linked. One job so sockets/timers cannot re-trigger the service.
+pub fn stop_all(units: &Units) -> Result<()> {
+    if units.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["stop"];
+    args.extend(units.keys().map(String::as_str));
+    systemctl(&args)
+}
+
+pub fn start_all(units: &Units) -> Result<()> {
+    let mut args = vec!["start"];
+    for (unit, path) in units {
+        if has_install(unit, path)? {
+            args.push(unit);
+        }
+    }
+    if args.len() == 1 {
+        return Ok(());
+    }
+    systemctl(&args)
+}
+
 /// Re-link units at boot without starting anything; systemd targets pull them in.
 pub fn relink(units: &Units) -> Result<()> {
     for (unit, path) in units {

@@ -99,6 +99,14 @@ pub enum Error {
     UnitFailed { service: String, unit: String },
     #[error("health probe unit '{unit}' of '{service}' failed")]
     HealthCheckFailed { service: String, unit: String },
+    #[error("service '{service}' cannot be {verb}:\n  {}", reasons.join("\n  "))]
+    NotTransferable {
+        service: String,
+        verb: &'static str,
+        reasons: Vec<String>,
+    },
+    #[error("oneshot unit '{unit}' of '{service}' failed")]
+    OneshotFailed { service: String, unit: String },
     #[error("rollback of '{service}' after failed deploy also failed: {source}")]
     RollbackFailed {
         service: String,

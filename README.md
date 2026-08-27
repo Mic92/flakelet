@@ -88,7 +88,15 @@ flakelet starts it after every activation and rolls back when it fails.
 The impl can also return `exports`,
 free-form metadata like claimed ports or metrics endpoints. flakelet publishes
 the exports of the running generation to `/run/flakelet/exports/<name>.json`,
-where firewall, reverse-proxy, monitoring or backup tooling can pick them up.
+where firewall, reverse-proxy or monitoring tooling can pick them up.
+
+State needs no declaration: `StateDirectory=` and `User=`/`DynamicUser=`
+already say what to carry and who owns it, so `flakelet export web | ssh
+hostb flakelet import -` moves a service including its data. Services that
+must serialise something first ship a `<name>-dump.service` /
+`<name>-restore.service` oneshot (or return `dumpScript`/`restoreScript`);
+databases behind `requires.postgres` are dumped by the provider, not the
+service.
 
 The template in `templates/service/flake.nix` shows all of this. DESIGN.md
 describes the full contract.
@@ -100,6 +108,8 @@ flakelet update [<name>…]        evaluate, build and activate
 flakelet status [--json]         generation, degraded/held state, lock holders
 flakelet diff <name>             closure diff: running generation vs. fresh eval
 flakelet rollback <name>         previous generation
+flakelet export <name> [-o f]    stop, archive state to stdout, start again
+flakelet import <f>|- [--name n] restore an export here and start it
 flakelet remove <name>           stop a service, delete state and generations
 flakelet reconcile               remove services dropped from the host config
 flakelet lock/unlock <name>      pin to the currently resolved revision
@@ -121,10 +131,10 @@ the machine and to fill the binary cache.
 Blessed contracts live in [contracts/](contracts/) as JSON Schema, with
 eval-time constructors in the injected `contracts`. Known implementations:
 
-| Contract      | Implementation                                                    |
-| ------------- | ----------------------------------------------------------------- |
-| `http/v1`     | [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)         |
-| `postgres/v1` | [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)   |
+| Contract      | Implementation                                                    | export/import |
+| ------------- | ----------------------------------------------------------------- | ------------- |
+| `http/v1`     | [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)         | stateless     |
+| `postgres/v1` | [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)   | not yet       |
 
 ## Real-world examples
 

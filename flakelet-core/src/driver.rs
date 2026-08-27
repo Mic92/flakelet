@@ -18,7 +18,7 @@ pub struct DriverEntry<'a> {
 
 /// Render the driver expression that is added to the store and evaluated with
 /// nix-eval-jobs. Each attribute builds a self-describing artifact:
-/// meta.json, units/<unit files> and optional exports.json.
+/// meta.json, state.json, units/<unit files> and optional exports.json.
 pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String {
     let nixpkgs = config
         .nixpkgs
@@ -85,6 +85,7 @@ pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String 
     in
     pkgs.linkFarm "flakelet-{raw_name}" ({{
       "meta.json" = pkgs.writeText "flakelet-{raw_name}-meta.json" {meta};
+      "state.json" = pkgs.writeText "flakelet-{raw_name}-state.json" (builtins.toJSON module.state);
       units = pkgs.linkFarm "flakelet-{raw_name}-units" module.units;
     }}
     // (if module ? exports then {{
