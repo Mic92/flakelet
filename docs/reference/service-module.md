@@ -94,10 +94,11 @@ exclusive with defining the corresponding `services.<key>` yourself.
 
 ## Activation semantics
 
-- Units with an `[Install]` section are enabled and (re)started.
-- Units without one are only `try-restart`ed if running; otherwise left to
-  socket/timer/dependency activation.
-- Units that disappeared are stopped and unlinked before new ones start.
+- All units of the previous generation are stopped in one job, disabled
+  and unlinked before the new ones are linked.
+- `failed` states are reset, then units with an `[Install]` section are
+  enabled and started.
+- Units without one are left to socket/timer/dependency activation.
 - After switching, `<name>-health.service` is started if present; a failed
   start job, or any unit of the entry in `failed` state, rolls back.
 - `<name>-dump.service` / `<name>-restore.service` are never started by

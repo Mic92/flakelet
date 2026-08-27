@@ -2,17 +2,10 @@
 
 This document explains why flakelet works the way it does. How to use it
 is in the [guides](guides/), exact formats and options are in the
-[reference](reference/).
+[reference](reference/). What flakelet is and what it looks like is in the
+[README](../README.md).
 
-flakelet runs native systemd services from Nix flakes. The idea is borrowed
-from `virtualisation.oci-containers`: the host configuration only names the
-thing to run and the settings to run it with, and the machine itself takes
-care of fetching and starting it. Instead of pulling a container image from a
-registry, flakelet resolves a flake reference, evaluates and builds it on the
-target machine, and switches the resulting systemd units. The units run
-straight from the nix store that the host already has.
-
-The point of this indirection is that services can be updated without
+The point of the flake indirection is that services can be updated without
 rebuilding or redeploying the host system. A service repository can move
 faster than the machine configuration, can be owned by a different person or
 team, and can be rolled back independently. At the same time nothing about
@@ -29,19 +22,12 @@ The moving parts are deliberately few:
 2. The NixOS module `services.flakelets`. It renders the machine-wide
    configuration file `/etc/flakelet/config.json` and generates the systemd
    units and timers that trigger updates.
-3. `flakelet.lib`, applied by the driver expression. It checks the
-   host-provided settings against the module's declared options
-   ([adios](https://github.com/adisbladis/adios) declarations over korora
-   types: `{ type, default?, description? }`, unknown keys rejected) and
-   validates and renders what `impl` returns: a typed, NixOS-style unit
-   interface with `services.<name>.serviceConfig`, `sockets` and `timers`,
-   an automatic name prefix and hard errors on unknown keys, so existing
-   NixOS modules can be ported by copy and paste. Helpers (`contracts`, `storePath`) are injected into `impl`.
-4. The service flakes themselves, in the adios module shape:
-   `flakelets.<output> = { types, … }: { options = {…}; impl = {…}: {…}; }`.
-   adios' `inputs`/`defaultFunc` wiring is not supported: a flakelet is a
-   single module whose inputs the driver injects. They live in their own
-   repositories and do not need any flake inputs.
+3. `flakelet.lib`, Nix code applied by the driver expression on the
+   machine. It type-checks settings and renders what `impl` returns into
+   unit files and `state.json`.
+4. The service flakes themselves, in the
+   [adios](https://github.com/adisbladis/adios) module shape, living in
+   their own repositories without flake inputs.
 
 ## Service contract
 
@@ -52,10 +38,15 @@ reasons behind it.
 `impl` is dependency-injected and service flakes have no inputs. The host
 decides which nixpkgs a service is built against, so a host upgrade
 delivers security fixes to every service without their authors doing
-anything, and one evaluation of nixpkgs is shared by the whole batch.
+anything, and one evaluation of nixpkgs is shared by the whole batch. The
+flip side is that bumping the host's nixpkgs rebuilds and restarts every
+service on the next update; a service that must not follow the host pins
+its own via `inputOverrides.nixpkgs`. Other input names are rejected,
+because `builtins.getFlake` cannot rewrite a flake's own lock purely.
 Everything a service needs beyond `pkgs` must therefore be injectable,
 which is why `contracts`, `storePath` and `extraModules` are arguments
-rather than libraries to import.
+rather than libraries to import. adios' own `inputs`/`defaultFunc` wiring
+is not supported for the same reason.
 
 Unit names and directories derive from the injected `name` rather than
 being fixed by the flake, so the same flake can be instantiated several
@@ -103,13 +94,12 @@ probes. Readiness and liveness stay where systemd already handles them:
 the start job and `Restart=`/`WatchdogSec=`.
 
 The probe is shipped by the service rather than configured on the host,
-because the service knows best how to probe itself. The `healthCheck`
-sugar runs it with the main unit's identity so it can reach `0660`
-sockets and read-only self-tests work without spelling the unit out; a
-service that wants a black-box probe from an unrelated user writes
-`services.health` explicitly.
+because the service knows best how to probe itself. The sugar gives it
+the main unit's identity because probes that talk to a `0660` socket or
+run a read-only self-test are the common case; a black-box probe from an
+unrelated user is the one to spell out.
 
-### State is derived, not declared
+### State is derived from the units
 
 A separate state declaration would duplicate what `StateDirectory=` and
 `User=`/`DynamicUser=` already say and could drift from it. So
@@ -121,25 +111,29 @@ data is touched. `CacheDirectory=` and friends are excluded because
 systemd's own semantics say they are disposable.
 
 Dump and restore hooks are units for the same reasons the health probe
-is. They run with the main unit's identity because their job is to read
-and write its state, and they require a `StateDirectory=` because without
-one they would have nowhere sandbox-safe to put their output.
-`extraFolders` demands a static `User=` because ownership of paths
-outside `/var/lib` cannot be fixed up by systemd on start the way
-`StateDirectory=` is.
+is, and share its identity because their job is to read and write that
+state. They insist on a `StateDirectory=` because without one they would
+have nowhere sandbox-safe to put their output. `extraFolders` insists on
+a static `User=` because ownership of paths outside `/var/lib` cannot be
+fixed up by systemd on start the way `StateDirectory=` is.
 
 ### Activation of native units
 
-Activation is deliberately boring. flakelet symlinks the generation's unit
-files into `/run/systemd/system/`, runs `systemctl daemon-reload`, and
-enables and starts the units according to their `[Install]` sections.
-Deactivation is the mirror image: stop and disable the units, remove the
-symlinks, reload systemd once more.
+Activation is deliberately boring and treats the entry as a whole: stop,
+disable and unlink all units of the old generation in one job, symlink the
+new ones into `/run/systemd/system/`, `daemon-reload`, clear stale `failed`
+states, then enable and start per `[Install]` (exact rules in the
+[reference](reference/service-module.md#activation-semantics)). Units
+without `[Install]` are left to systemd on purpose, so deploying a
+socket-activated service or a timer does not fire it. No per-unit diffing
+means a socket is never restarted while its service still runs and two
+generations are never loaded at once.
 
 `/run` is a tmpfs and does not survive a reboot. That is intentional: the
 `flakelet-boot.service` oneshot re-creates the symlinks for the current
-generation early during boot, before `multi-user.target`, and needs neither
-evaluation nor network access to do so. `/etc/systemd/system` belongs to
+generation during boot and queues start jobs for their `[Install]` units
+(`--no-block`, since the boot transaction was computed before these units
+existed). It needs neither evaluation nor network access. `/etc/systemd/system` belongs to
 NixOS activation and flakelet never touches it, so a `nixos-rebuild switch`
 and a flakelet update cannot fight over the same files.
 
@@ -153,20 +147,23 @@ its narHash, and the settings are embedded as Nix values. This is what makes
 the evaluation pure; no `--impure` flag is needed anywhere.
 
 ```nix
-# /nix/store/…-flakelet-driver.nix (generated per update)
+# /nix/store/…-flakelet-driver.nix (generated per update), abridged
 let
-  pkgs  = import /nix/store/…-nixpkgs-source { system = "x86_64-linux"; };
-  adios = import /nix/store/…-adios;
+  pkgs = import /nix/store/…-nixpkgs-source { system = "x86_64-linux"; };
 in {
-  grafana = (builtins.getFlake
-      "github:me/grafana-svc/<rev>?narHash=sha256-…").flakelets.default {
-    inherit pkgs adios;
-    name = "grafana";
-    settings = { port = 3000; tlsCert = "/nix/store/…-cert.pem"; };
-  };
+  grafana =
+    let
+      flakeletLib = import /nix/store/…-lib { inherit pkgs; name = "grafana"; adios = /nix/store/…-adios; };
+      module = flakeletLib.evalModule
+        (builtins.getFlake "github:me/grafana-svc/<rev>?narHash=sha256-…").flakelets.default
+        { settings = { port = 3000; tlsCert = "/nix/store/…-cert.pem"; }; extraModules = [ ]; };
+    in
+    pkgs.linkFarm "flakelet-grafana" { "meta.json" = …; "state.json" = …; units = …; "exports.json" = …; };
   matrix = …;   # several services batch into one driver, sharing the pkgs instance
 }
 ```
+
+`flakelet driver <name>` prints the real thing.
 
 An update of a service walks through the following steps:
 
@@ -175,11 +172,8 @@ An update of a service walks through the following steps:
    store paths mentioned in the settings actually exist. Resolve the flake
    reference to a locked URL with revision and narHash using
    `nix flake metadata`; if the operator pinned the service with
-   `flakelet lock`, the pin wins. An `input_overrides.nixpkgs` entry is
-   resolved to a locked reference and replaces the pkgs instance injected
-   into that service; other input names are rejected, because
-   `builtins.getFlake` cannot rewrite a flake's own lock purely and the
-   service contract forbids flake inputs anyway.
+   `flakelet lock`, the pin wins. An `inputOverrides.nixpkgs` entry is
+   resolved the same way and replaces the pkgs instance for that entry.
 2. Render the driver expression and add it to the store with `nix store add`,
    where it is also gc-rooted. Keeping the driver around pays off when
    something goes wrong: every error message references the store path of the
@@ -201,23 +195,20 @@ stable user gives the shared evaluation cache in `/var/cache/flakelet` a
 consistent owner across updates. Builds go through the nix daemon like any
 other build on the machine. Only the systemctl steps at the end run as root.
 
-Evaluating nixpkgs is not free, so the resource usage is bounded on several
-levels. nix-eval-jobs runs with a configurable number of workers; the default
-is a single worker, because the whole batch shares one nixpkgs instance
-anyway and more workers mostly cost memory. Its memory limit is derived from
-the available RAM unless configured explicitly. The flakelet oneshot units
-run with `MemoryHigh`, `Nice` and `IOSchedulingClass=idle`, so a scheduled
-update cannot starve the services that are already running. Builds inherit
-`max-jobs` and `cores` from the nix daemon configuration.
+Evaluating nixpkgs is not free, so resource usage is bounded: one
+nix-eval-jobs worker by default, because the batch shares one nixpkgs
+instance and more workers mostly cost memory; a memory limit derived from
+RAM; and the update units run niced with `MemoryHigh` and idle I/O so a
+scheduled update cannot starve the services already running.
 
 One subtlety about settings that contain store paths: a string like
 `/nix/store/…-cert.pem` inside the settings has no string context, so the
 built artifact does not depend on it and nix would happily garbage-collect
 it. flakelet therefore checks that such paths exist before evaluating and
-gc-roots them per generation. If a service needs actual build-time content
-from the host, the injected `storePath` helper turns such a string into one with
-context (via `builtins.appendContext`, since `builtins.storePath` is banned
-in pure evaluation), making the artifact really depend on it.
+gc-roots them per generation; `storePath` exists for the rarer case where
+the build itself must read the file (`builtins.appendContext`, since
+`builtins.storePath` is banned in pure evaluation). Secret paths outside
+the store are checked for existence too but obviously not rooted.
 
 ## Files on the machine
 
@@ -264,7 +255,10 @@ name, the declarative definition wins and flakelet warns about the shadowed
 manual one.
 
 `flakelet remove <name>` deactivates the units, prunes all generations and
-deletes the state directory. `flakelet reconcile` looks for services whose
+deletes flakelet's bookkeeping for the entry; the service's own
+`StateDirectory=` is left alone unless `--purge`, because deleting data
+should never be a side effect of a rename in the host configuration.
+`flakelet reconcile` looks for services whose
 state says they were declarative but which no longer appear in config.json,
 and removes them; this is what cleans up after a service is renamed or
 deleted in the host configuration. Manual services are never touched by
@@ -292,31 +286,20 @@ because a human can actually do something about it.
 
 A regular update proceeds like this:
 
-1. Evaluate and build the new generation (or take the prebuilt artifact).
+1. Evaluate and build the new generation, or take the prebuilt artifact.
    If this fails, keep the current generation, record the error in the
    state and exit non-zero.
-2. If the resulting artifact is the one a previous activation failed on,
-   skip it. This is the anti-flapping rule: without it a broken update
-   would restart the working service on every timer tick. Keying the hold
-   on the artifact covers settings, revision, host nixpkgs and prebuilt
-   paths alike; `--force` overrides it.
+2. If the artifact is the one a previous activation failed on, skip it.
+   This is the anti-flapping rule. Without it a broken update would
+   restart the working service on every timer tick. Keying the hold on
+   the artifact covers settings, revision, host nixpkgs and prebuilt paths
+   alike. `--force` overrides it.
 3. If the artifact is the active generation's, there is nothing to do.
-4. Otherwise switch the entry as a whole: publish the new exports (so a
-   provider can act on `requires.*` before the units need it), stop,
-   disable and unlink all units of the old generation in one job, link the
-   new generation's units into `/run/systemd/system`, reload systemd, clear
-   any `failed` state left from before, then enable and start the units
-   that have an `[Install]` section. Units without one are pulled in on
-   demand, so a socket-activated service stays inactive until a connection
-   arrives and a timer's job does not fire just because the service was
-   deployed. Treating the entry as a unit avoids per-unit ordering problems
-   (a socket cannot be restarted while its service runs) and never leaves a
-   mix of two generations loaded.
-5. Verify health. If the generation ships a `<name>-health.service` probe
-   unit, start it and treat a failed start job as unhealthy; systemd provides
-   the timeout, the journal entry and the sandbox. Then no unit of the
-   service may be in the `failed` state; socket- and timer-activated units
-   are allowed to be inactive.
+4. Otherwise publish the new exports, so a provider can act on
+   `requires.*` before the units need it, and switch as described under
+   Activation above.
+5. Verify health: start the probe unit if there is one, then require that
+   no unit of the entry is `failed` (inactive is fine for on-demand units).
 6. If activation or the health probe failed, delete the new generation
    directory (it never ran, so it is no rollback target), re-publish the
    previous exports and switch back to the previous generation. Its unit
@@ -338,13 +321,6 @@ During `nixos-rebuild switch`, `flakelet-reconcile.service` is ordered before
 the per-service update units. That way a renamed or removed service is
 deactivated before a new name tries to claim its ports or unit names.
 
-One coupling deserves a warning: the injected `pkgs` is the host's nixpkgs.
-Bumping the host's nixpkgs therefore changes the inputs of every service, and
-the next update rebuilds and restarts all of them. Most of the time this is
-exactly what you want, because it is how services pick up security fixes
-without their authors doing anything. A service that must not follow the host
-can pin its own nixpkgs via `input_overrides.nixpkgs`.
-
 ## Concurrency
 
 Several flakelet processes can run at the same time: timers fire while an
@@ -353,9 +329,12 @@ oneshots while a deploy is in flight. File locks keep this safe.
 
 Every mutating operation takes a per-service flock at
 `<state_dir>/<name>/lock`. The lock file records who holds it, so a waiting
-process can tell the operator what it is waiting for. Waiting is the default;
-`--no-wait` makes the attempt fail immediately, which is what the timer units
-use so they never pile up. A global lock at `<state_dir>/lock` is taken in
+process can tell the operator what it is waiting for. Waiting is the
+default; `--no-wait` makes the attempt fail immediately for scripts that
+prefer that. The generated units simply wait: systemd never runs the same
+oneshot twice concurrently, so timer ticks cannot pile up behind each
+other, and a host activation that changed settings should apply once the
+operator's manual run finishes rather than be dropped. A global lock at `<state_dir>/lock` is taken in
 shared mode by normal service operations and exclusively by `flakelet gc`,
 because gc must not race an update that is just creating a new generation.
 The lock order is always global first, then service, which rules out
@@ -369,18 +348,15 @@ directory behind, which the next update or gc removes.
 ## Checking and CI across machines
 
 Everything up to activation works without being root and without touching
-state, so the same code path can run on a developer laptop or in CI
+state, so the same code path runs on a developer laptop or in CI
 (`flakelet check`/`build`/`driver`, see the [CLI reference](reference/cli.md)).
-`--machine <name>` builds
-`nixosConfigurations.<name>.config.services.flakelets.configFile` from a
-flake, defaulting to the flake in the current directory, and feeds that
-rendered config into the normal driver path. Flake references resolve at
-check time, so CI sees what a machine would deploy right now; pinning
-revisions for pull-request CI via `--override-ref` is a follow-up. Wrapping
-these commands as flake checks lets a build farm evaluate and build the
-flakelets of every machine and prime the binary cache, so the machines
-themselves only download. Manual services can only be checked on their
-machine, because only that machine knows about them.
+`--machine` feeds a NixOS configuration's rendered config.json into the
+normal driver path instead of inventing a second evaluation mode. Flake
+references resolve at check time, so CI sees what a machine would deploy
+right now; pinning revisions for pull-request CI is a follow-up. A build
+farm running these primes the binary cache so machines only download.
+Manual services can only be checked on their machine, because only that
+machine knows about them.
 
 ## Crates
 
@@ -418,26 +394,21 @@ portable.
 
 ### NixOS module
 
-Options are listed in the [host options reference](reference/host-options.md).
-The module creates the `flakelet` user together with `/var/cache/flakelet`
-and `/var/lib/flakelet`, installs `flakelet-boot.service` and renders
-config.json. The nixpkgs and adios store paths written into the config come
-from the host's own flake inputs, so they are part of the host closure and
-cannot be garbage-collected before the services root them per generation.
+Options and generated units are listed in the
+[host options reference](reference/host-options.md). Two points of design:
 
-Every configured service gets a oneshot `flakelet-<name>.service` that runs
-`flakelet update <name>`. It is `RemainAfterExit`, so a configuration
-switch re-runs it only when the service's entry changed, and it is ordered
-after `flakelet-reconcile.service` so removals happen before additions.
-Enabling `autoUpdate` adds `flakelet-<name>-auto.timer` and a matching
-non-remaining oneshot with the configured interval; a per-host stable
-random delay (`RandomizedDelaySec` with `FixedRandomDelay`) spreads the
-firings across a fleet, so one new revision does not restart the service on
-every machine at the same moment. In practice updates
-are therefore triggered from two directions: a change in the host
-configuration triggers the restart of the oneshot, and a new revision of the
-service flake is picked up by the timer or by an operator running
-`flakelet update` by hand.
+The nixpkgs and adios store paths written into config.json come from the
+host's own flake inputs, so they are part of the host closure and cannot be
+garbage-collected before the services root them per generation.
+
+Updates are triggered from two directions. A change to the entry in the
+host configuration restarts its oneshot (`RemainAfterExit` plus
+`restartTriggers` on a hash of the entry, so unrelated switches do not
+re-run it), and a new revision of the service flake is picked up by the
+`flakelet-<name>-auto` timer or an operator. The timer uses a per-host
+stable random delay so one new revision does not restart the service on
+every machine of a fleet at the same moment, while each host's offset
+stays predictable.
 
 ## Exports for monitoring, state and discovery
 
@@ -478,13 +449,13 @@ exports above. `requires` is a claim a provider must act on: "I need a
 postgres database". It travels in the same exports file:
 
 ```nix
-impl = { options, pkgs, name, ... }: {
+impl = { options, pkgs, name, contracts, ... }: {
   services.${name}.serviceConfig = {
     ExecStart = "${pkg}/bin/serve --db postgresql://${name}@/${name}?host=/run/postgresql";
     User = name;
   };
   exports = {
-    http.web = { host = options.domain; upstream = "unix:/run/${name}/web.sock"; };
+    http.web = contracts.http { host = options.domain; upstream = "unix:/run/${name}/web.sock"; };
     requires.postgres = { database = name; role = name; };
   };
 };
@@ -500,57 +471,33 @@ the complexity this design avoids.
 
 Providers run on the host, typically as NixOS modules, because they own
 host-scope resources: ports 80/443 and certificates for nginx, the superuser
-socket for postgres. A provider may also be a flakelet itself. The rules:
+socket for postgres. A provider may also be a flakelet itself. The
+[provider rules](reference/contracts.md#provider-rules) follow from a few
+decisions:
 
-- Level-triggered: a path unit wakes the provider, which reconciles from the
-  full directory, never from a delta. That absorbs missed events, coalescing
-  and provider restarts.
-
-  ```ini
-  [Path]
-  PathChanged=/run/flakelet/exports
-  ```
-
-- Provisioning is idempotent and add-only. Nothing is deprovisioned
-  automatically, not even on `flakelet remove`: a rollback must land on a
-  generation whose database still exists. Orphans are listed by the provider
-  and deleted by humans. Stateless renderings (vhosts) do converge: an
-  absent export file tears the route down, which is why `flakelet remove`
-  deletes the export file.
-- One provider per contract per host.
-- Each provider announces its capability:
-
-  ```json
-  // /etc/flakelet/providers.d/postgres-v1.json
-  { "contract": "postgres/v1" }
-  ```
-
-  flakelet does not parse contract schemas; it only warns in `check` and
-  `status` when a claim has no announcer. Enforcement stays soft: a missing
-  provider surfaces as a failed start, `Restart=` retries until provisioning
-  catches up. First-deploy races resolve the same way, not by an ordering
-  protocol. Unknown keys in the announcement are ignored.
-- A provider that can move the resource it provisions announces how:
-
-  ```json
-  { "contract": "postgres/v1",
-    "state": { "dump": "/nix/store/…/bin/dump", "restore": "/nix/store/…/bin/restore" } }
-  ```
-
-  Both are called by `flakelet export`/`import` as `<hook> <claim.json>
-  <dir>` once per `requires.<contract>` claim. What they write into `<dir>`
-  is opaque to core. `restore` must create the resource itself if it does
-  not exist yet, because on import it runs before the exports file that
-  normally triggers provisioning is published, and it refuses a non-empty
-  one, which keeps provisioning add-only. This is host tooling talking to a
-  host provider at export time, not the provider→service feedback channel
-  ruled out above. A provider without `state` makes its consumers
-  non-exportable, which `status --json` and `export --dry-run` report.
+- Level-triggered reconciliation from the whole exports directory rather
+  than events, because that absorbs missed wakeups, coalescing and provider
+  restarts with no protocol.
+- Add-only provisioning, because a rollback must land on a generation whose
+  database still exists. Hence nothing is dropped even on `remove`, and
+  orphans are a human's decision. Stateless renderings such as vhosts are
+  the exception that may converge, which is why `remove` deletes the
+  exports file.
+- Soft enforcement. flakelet does not parse contract schemas and only warns
+  about claims nobody announces; a missing provider shows up as a failed
+  start that `Restart=` retries. First-deploy races resolve the same way
+  instead of through an ordering protocol.
+- Provider `state.dump`/`restore` hooks are host tooling talking to a host
+  provider at export time, not the provider→service feedback channel ruled
+  out above. `restore` must create the resource itself because on import it
+  runs before the exports file that normally triggers provisioning exists,
+  and must refuse a non-empty one to stay add-only.
 
 Contracts inherit the version 1 trust model: services may claim any domain
 or database name, which is also what lets blue/green instances share one
-database. Providers still validate exports against the schema, catching
-mistakes rather than attackers. If multi-tenancy ever arrives, provider-side
+database. Providers still validate exports against the schema; that is a
+guard against malformed claims and no security boundary. If multi-tenancy
+ever arrives, provider-side
 grant options are the extension point; flakelet core would not change.
 
 Where a contract lives follows one criterion: whether services reach it
@@ -573,8 +520,8 @@ Providers are guests in host services, never owners: they extend only through
 append-safe merge points (an nginx include directive, SQL-level
 provisioning) and must compose with an existing `services.nginx` or
 `services.postgresql` configuration. Implementations live in their own
-repositories, named for what they wrap (`flakelet-nginx`,
-`flakelet-postgres`); the known ones are listed in the README.
+repositories, named for what they wrap; the known ones are listed in the
+README.
 
 ## Export and import
 
@@ -596,13 +543,10 @@ silently reused.
 
 Import pins a freshly registered entry to the exported revision so state
 is restored onto the code that wrote it, but defers to an entry the
-target already declares, because that is the normal migration case and
-the host configuration is the source of truth. It refuses non-empty
-target folders rather than merging, checks users and providers before
-building, and compares the evaluated `state.json` with the archive before
-extracting, so a mismatch is caught before any data lands. Everything
-after extraction is ordinary activation, so the health probe and rollback
-apply unchanged.
+target already declares, because the host configuration is the source of
+truth. It refuses non-empty target folders rather than merging, and every
+check that can fail runs before any data is extracted. After extraction
+it is ordinary activation, so health probe and rollback apply unchanged.
 
 Backup adapters (`flakelet-borgbackup`, a clan `state` bridge) link
 `flakelet-core` and reuse the same steps with their own storage, schedule
@@ -625,21 +569,8 @@ id-maps) the `StateDirectory` to the unit's user on start, which covers the
 migration from a dynamic to a static user as well as importing state onto a
 machine where the uids differ. `flakelet import` therefore extracts
 `StateDirectory=` contents root-owned and lets the first start fix them;
-only `extraFolders` are chowned by core, to the static `User=`/`Group=`
-names recorded at export, which must exist on the target. Paths outside the
-`StateDirectory` can fall back to an `ExecStartPre=+chown …` line, where
-the leading `+` runs that one command as root.
-
-## Secrets
-
-Nothing here is specific to flakelet, the rules are the same as for any Nix
-deployment. Secret values must never travel through settings or unit files,
-because both end up world-readable in the nix store. Instead the settings
-carry paths to secret files that the host manages with sops-nix, clan vars or
-similar, and the units consume those files with `LoadCredential=`,
-`BindReadOnlyPaths=` or `LoadCredentialEncrypted=`. flakelet checks that such
-paths exist before deploying but does not gc-root them, since they are not
-store paths.
+only `extraFolders` are chowned by core, to the static names recorded at
+export, and the archive carries no numeric uids at all.
 
 ## Trust in version 1
 
@@ -676,8 +607,7 @@ the next one.
 - `flakelet check --override-ref` to pin revisions in pull-request CI.
 - A backup adapter on top of the export steps, for clan borgbackup and
   localbackup; `state.{dump,restore}` in `flakelet-postgres`.
-- Contract implementations: `flakelet-nginx` and `flakelet-postgres`, plus
-  firewall integrations consuming `exports.ports`.
+- Firewall and metrics consumers for `exports.ports` / `exports.metrics`.
 - Automatic port allocation: a service asks for one tcp port, flakelet
   assigns it from a range and feeds it back through settings.
 - A web service on top of `flakelet-core` for remote deploy triggers.

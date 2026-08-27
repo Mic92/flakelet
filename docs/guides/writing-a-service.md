@@ -46,8 +46,8 @@ host can then run the same flake twice under different names.
 
 The return value looks like NixOS: `services`, `sockets`, `timers`,
 `targets`, `paths`, each with `serviceConfig`/`socketConfig`/… and the
-usual `wantedBy`, `after`, `environment`, `path`. A typo in a key is an
-error, not a silently empty unit. See the
+usual `wantedBy`, `after`, `environment`, `path`. Unknown keys are
+rejected, so a typo like `serviceconfig` fails the update. See the
 [service module reference](../reference/service-module.md) for every
 accepted attribute.
 
@@ -90,8 +90,9 @@ are switched and rolled back together.
 ## When units start
 
 Units with `wantedBy`/`requiredBy` are enabled and started on activation.
-Units without are left to systemd. A socket-activated service starts on
-the first connection. A timer's job runs on schedule, not at deploy time.
+Units without are left to systemd, so a socket-activated service starts on
+the first connection and a timer's job runs on schedule, not at deploy
+time ([exact rules](../reference/service-module.md#activation-semantics)).
 
 ```nix
 impl = { options, pkgs, name, ... }: {
@@ -107,7 +108,6 @@ impl = { options, pkgs, name, ... }: {
 };
 ```
 
-Changed units that are currently running are restarted in both cases.
 
 ## Health checks
 

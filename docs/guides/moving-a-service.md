@@ -11,11 +11,14 @@ long as state lives in `StateDirectory=` (see
 hosta$ flakelet export web | ssh hostb flakelet import -
 ```
 
-`export` stops all units of `web`, runs `web-dump.service` if the service
-ships one, tars every `StateDirectory=` folder, starts the units again and
-streams a zstd archive. `import` builds `web` on hostb pinned to the
-exported revision, checks that the state folders there are empty, extracts
-them, runs `web-restore.service` and activates, health probe included.
+On hosta, `export` stops all units of `web`. It runs `web-dump.service` if
+the service ships one. Then it tars every `StateDirectory=` folder, starts
+the units again and streams a zstd archive to stdout.
+
+On hostb, `import` builds `web` pinned to the exported revision. It checks
+that the state folders are empty and extracts the archive into them. Then
+it runs `web-restore.service` and activates the service, health probe
+included.
 
 If hostb's NixOS configuration already declares `web`, that entry and its
 settings are used. Otherwise a manual entry is registered from the archive.
@@ -26,10 +29,8 @@ settings are used. Otherwise a manual entry is registered from the archive.
 hosta$ flakelet export web --dry-run | jq
 ```
 
-prints what would be exported, or why it cannot be: never deployed,
-currently degraded, built by a flakelet too old to record state, or a
-`requires.*` claim whose provider cannot dump. `flakelet status --json`
-shows the same under `export_blockers`.
+This prints what would be exported, or why the service cannot be
+exported.
 
 ## Settings with host paths
 
@@ -75,10 +76,9 @@ tells you.
 
 ## Static users
 
-`DynamicUser=` state is extracted root-owned and systemd fixes ownership on
-first start, so differing uids do not matter. For `User=` services and
+uids need not match between hosts. For `User=` services and
 `exports.state.extraFolders` the named user and group must already exist
-on the target host.
+on the target host ([why](../design.md#users-and-state-ownership)).
 
 ## What can go wrong
 

@@ -9,7 +9,7 @@ same information with examples.
 
 | command | does |
 | ------- | ---- |
-| `update [<name>…] [--force] [--no-wait] [--offline-fallback] [--no-refresh] [--flake <ref>]` | resolve, evaluate, build, activate. No names = all entries plus `reconcile`. `--force` retries a held entry. `--no-wait` fails instead of waiting for a lock. `--offline-fallback` keeps current units and exits 0 on network errors (used by the generated units). `--no-refresh` uses cached flake metadata. `--flake` deploys one entry from another ref once; the next plain update reverts. |
+| `update [<name>…] [--force] [--no-wait] [--offline-fallback] [--no-refresh] [--flake <ref>]` | resolve, evaluate, build, activate. No names = all entries plus `reconcile`. `--force` retries a [held](files.md#statejson) entry. `--no-wait` fails instead of waiting for another flakelet process. `--offline-fallback`: see exit status. `--no-refresh` uses cached flake metadata. `--flake` deploys one entry from another ref once; the next plain update reverts. |
 | `deploy <name> --flake <ref> [--settings <file>] [--output <attr>] [update options]` | register a manual entry in `/var/lib/flakelet/<name>/service.json` and update it |
 | `activate <name> <store path>` | register and start a prebuilt artifact, no evaluation |
 | `rollback <name>` | switch to the previous generation; the next update rolls forward again |
@@ -53,10 +53,3 @@ See [Moving a service](../guides/moving-a-service.md).
 Non-zero on any failure, including a deploy that was rolled back. With
 `--offline-fallback` a network failure during evaluation is exit 0 and
 marks the entry degraded.
-
-## Locks
-
-Per-entry `flock` at `/var/lib/flakelet/<name>/lock`, global at
-`/var/lib/flakelet/lock` (shared for entry operations, exclusive for `gc`).
-Order is global then entry. `status`/`diff` take none and report a held
-lock as "updating".
