@@ -1038,12 +1038,18 @@ impl Manager {
             state: artifact.state.clone(),
             created: unix_time(),
         };
+        exports::provision(
+            name,
+            &artifact.exports,
+            &self.config.providers_dir,
+            &self.service_dir(name),
+        )?;
         let generation = gens.create(&manifest, &extra_roots)?;
 
         eprintln!("{name}: activating generation {generation}");
         let previous_units = previous.map(|m| m.units.clone()).unwrap_or_default();
-        // Publish first so a provider can provision what the units'
-        // readiness probe needs.
+        // Publish first so level-triggered providers without a provision
+        // hook can act before the readiness probe needs them.
         exports::publish(&self.config.runtime_dir, name, &artifact.exports)?;
         let result =
             systemd::switch(&previous_units, &units).and_then(|()| health_check_run(name, &units));

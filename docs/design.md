@@ -483,10 +483,15 @@ decisions:
   orphans are a human's decision. Stateless renderings such as vhosts are
   the exception that may converge, which is why `remove` deletes the
   exports file.
-- Soft enforcement. flakelet does not parse contract schemas and only warns
-  about claims nobody announces; a missing provider shows up as a failed
-  start that `Restart=` retries. First-deploy races resolve the same way
-  instead of through an ordering protocol.
+- Provisioning is a synchronous hook flakelet calls before starting units,
+  because the alternative, a provider watching the exports directory, is
+  edge-triggered in practice: systemd path units drop changes that arrive
+  while the provider is already running, and the service would start before
+  its database exists. A hook also ports to hosts without systemd path
+  units. Watching the directory remains the mechanism for things flakelet
+  cannot sequence, such as tearing down a vhost after `remove`.
+- flakelet does not parse contract schemas and only warns about claims
+  nobody announces.
 - Provider `state.dump`/`restore` hooks are host tooling talking to a host
   provider at export time, not the provider→service feedback channel ruled
   out above. `restore` must create the resource itself because on import it

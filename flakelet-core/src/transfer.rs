@@ -254,7 +254,7 @@ fn run_stdio(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn run(program: &str, args: &[&str]) -> Result<()> {
+pub(crate) fn run(program: &str, args: &[&str]) -> Result<()> {
     let out = Command::new(program)
         .args(args)
         .output()

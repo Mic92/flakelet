@@ -32,6 +32,9 @@ pub fn unpublish(runtime_dir: &Path, name: &str) -> Result<()> {
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct Provider {
     pub contract: String,
+    /// `<provision> <claim.json>`, run before the units start.
+    #[serde(default)]
+    pub provision: Option<PathBuf>,
     #[serde(default)]
     pub state: Option<ProviderState>,
 }
@@ -58,6 +61,38 @@ pub fn providers(providers_dir: &Path) -> Option<Vec<Provider>> {
             .filter_map(|data| serde_json::from_str(&data).ok())
             .collect(),
     )
+}
+
+/// Claims whose provider has no `provision` hook are skipped.
+pub fn provision(name: &str, exports: &Value, providers_dir: &Path, work_dir: &Path) -> Result<()> {
+    let Some(requires) = exports.get("requires").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let Some(providers) = providers(providers_dir) else {
+        return Ok(());
+    };
+    for (claim, body) in requires {
+        let Some(hook) = providers
+            .iter()
+            .find(|p| p.claim() == claim)
+            .and_then(|p| p.provision.as_ref())
+        else {
+            continue;
+        };
+        let claim_file = work_dir.join(format!("{name}-requires-{claim}.json"));
+        write_json_atomic(&claim_file, body)?;
+        eprintln!(
+            "{name}: requires.{claim}: provisioning via {}",
+            hook.display()
+        );
+        let r = crate::transfer::run(
+            &hook.display().to_string(),
+            &[&claim_file.display().to_string()],
+        );
+        let _ = fs::remove_file(&claim_file);
+        r?;
+    }
+    Ok(())
 }
 
 pub fn claims(exports: &Value) -> Vec<String> {
@@ -157,6 +192,44 @@ mod tests {
         .unwrap();
         assert_eq!(unannounced_claims(&exports, dir.path()), vec!["redis"]);
         assert!(unannounced_claims(&json!({}), dir.path()).is_empty());
+    }
+
+    #[test]
+    fn provision_runs_hook_with_claim_and_propagates_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let providers = dir.path().join("providers.d");
+        fs::create_dir(&providers).unwrap();
+        let out = dir.path().join("out");
+        let hook = dir.path().join("provision");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\ncat \"$1\" > {}\n", out.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let failing = dir.path().join("fail");
+        fs::write(&failing, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            providers.join("pg.json"),
+            json!({ "contract": "postgres/v1", "provision": hook }).to_string(),
+        )
+        .unwrap();
+        fs::write(providers.join("kv.json"), r#"{ "contract": "kv/v1" }"#).unwrap();
+
+        let exports = json!({ "requires": { "postgres": { "database": "web" }, "kv": {} } });
+        provision("web", &exports, &providers, dir.path()).unwrap();
+        let got: Value = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(got, json!({ "database": "web" }));
+        assert!(!dir.path().join("web-requires-postgres.json").exists());
+
+        fs::write(
+            providers.join("pg.json"),
+            json!({ "contract": "postgres/v1", "provision": failing }).to_string(),
+        )
+        .unwrap();
+        assert!(provision("web", &exports, &providers, dir.path()).is_err());
     }
 
     #[test]

@@ -9,7 +9,7 @@ newest intact generation.
 | path | written by | content |
 | ---- | ---------- | ------- |
 | `/etc/flakelet/config.json` | NixOS module | machine config and declarative entries, world-readable, no secrets |
-| `/etc/flakelet/providers.d/*.json` | provider modules | `{ "contract": "postgres/v1", "state"?: { "dump", "restore" } }` |
+| `/etc/flakelet/providers.d/*.json` | provider modules | `{ "contract": "postgres/v1", "provision"?: exe, "state"?: { "dump", "restore" } }` |
 | `/var/lib/flakelet/<name>/service.json` | `deploy`, `import` | manual entry; same shape as one `services.<name>` in config.json |
 | `/var/lib/flakelet/<name>/state.json` | every mutating command, atomically | what is deployed now |
 | `/var/lib/flakelet/<name>/lock`, `/var/lib/flakelet/lock` | flock | holder description; per-entry exclusive, global shared (exclusive for `gc`), taken global-then-entry. `status`/`diff` take none |
