@@ -303,6 +303,8 @@ rec {
           { }
         else if a ? services.${key} then
           fail "${opt} and services.${key} are mutually exclusive"
+        else if serviceConfig == identity && !(main ? StateDirectory) then
+          fail "${opt} needs services.${name} with a StateDirectory= to read and write"
         else
           {
             ${key} = {
