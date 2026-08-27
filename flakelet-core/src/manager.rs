@@ -292,6 +292,11 @@ impl Manager {
         Ok(result)
     }
 
+    fn current_artifact(&self, name: &str, st: &State) -> Option<PathBuf> {
+        let gens = Generations::new(&self.config.gcroot_dir, name);
+        gens.manifest(st.generation?).ok()?.artifact
+    }
+
     fn export_blockers(&self, st: &State, need_restore: bool) -> Vec<String> {
         if st.generation.is_none() {
             return vec!["never deployed".into()];
@@ -883,9 +888,7 @@ impl Manager {
             self.restore(name, &artifact, dir)?;
             // restore() stopped the units. Make switch() start them again.
             st.units.clear();
-        } else if artifact.units == st.units && !opts.force {
-            // Exports may change without the units changing (e.g. a metrics hint).
-            exports::publish(&self.config.runtime_dir, name, &artifact.exports)?;
+        } else if !opts.force && self.current_artifact(name, st).as_ref() == Some(&artifact.out) {
             st.degraded = false;
             st.last_error = None;
             return Ok(UpdateOutcome::UpToDate);
