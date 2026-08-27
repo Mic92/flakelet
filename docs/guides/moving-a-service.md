@@ -19,19 +19,15 @@ prints what would be exported, or why the service cannot be exported.
 hosta$ flakelet export web --to hostb | ssh hostb flakelet import -
 ```
 
-On hosta, `export` stops all units of `web`, runs `web-dump.service` if
-the service ships one, tars every `StateDirectory=` folder and streams a
-zstd archive to stdout. `web` is then left **disabled** on hosta: updates,
-`nixos-rebuild switch` and reboots no longer start it. `--to` only labels
-what `flakelet status` shows.
+hosta stops `web`, streams its state and leaves the entry **disabled**:
+updates, `nixos-rebuild switch` and reboots no longer start it there.
+hostb builds `web` at the exported revision, restores the state and
+starts it ([step by step](../reference/cli.md#moving-state)).
 
-On hostb, `import` builds `web` pinned to the exported revision, checks
-that its state folders are empty, extracts the archive, runs
-`web-restore.service` and starts the service with its health probe. If
-hostb's NixOS configuration declares `web`, that entry and its settings
-are used. Otherwise a manual entry is registered from the flake reference
-in the archive; pass `--settings <file>` if the service needs any, since
-settings are host configuration and do not travel.
+If hostb's NixOS configuration declares `web`, that entry and its
+settings are used. Otherwise a manual entry is registered from the flake
+reference in the archive. Settings do not travel, so pass
+`--settings <file>` if the service needs any.
 
 Finally move the `services.flakelets.services.web` block from hosta's
 configuration to hostb's and deploy both. hostb adopts the running entry

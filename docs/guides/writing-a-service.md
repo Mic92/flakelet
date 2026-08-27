@@ -44,12 +44,9 @@ missing required options fail the update and name the offending key.
 `name` the host chose. Derive unit names and directories from `name`. The
 host can then run the same flake twice under different names.
 
-The return value looks like NixOS: `services`, `sockets`, `timers`,
-`targets`, `paths`, each with `serviceConfig`/`socketConfig`/… and the
-usual `wantedBy`, `after`, `environment`, `path`. Unknown keys are
-rejected, so a typo like `serviceconfig` fails the update. See the
-[service module reference](../reference/service-module.md) for every
-accepted attribute.
+The return value is shaped like NixOS' `systemd.*` options
+([full list](../reference/service-module.md)). Unknown keys are rejected,
+so a typo like `serviceconfig` fails the update.
 
 Try it locally without a host:
 
@@ -201,34 +198,24 @@ exports.state.extraFolders = [ "/srv/media" ];
 
 ## Exports
 
-`exports` is metadata for host tooling: firewall, reverse proxy,
-monitoring. flakelet publishes it to `/run/flakelet/exports/<name>.json`
-for the running generation.
+`exports` tells the host what the service offers or needs, for example a
+reverse-proxy route and a database:
 
 ```nix
 impl = { options, name, contracts, ... }: {
-  services.${name}.serviceConfig = {
-    ExecStart = "…";
-    DynamicUser = true;
-    RuntimeDirectory = name;
-  };
+  services.${name}.serviceConfig = { … };
   exports = {
-    # a raw TCP listener; colliding claims between services are refused
-    ports.metrics = { port = 9100; internal = true; };
-    metrics = [ { port = 9100; } ];
-    # reverse-proxy route, picked up by e.g. flakelet-nginx
     http.web = contracts.http {
       host = options.domain;
       upstream = "unix:/run/${name}/web.sock";
     };
-    # ask the host's postgres provider for a database (peer auth, no password)
     requires.postgres = { database = name; role = name; };
   };
 };
 ```
 
-The shapes are listed in the
-[contracts reference](../reference/contracts.md).
+Provider modules on the host act on these. The available shapes are in
+the [contracts reference](../reference/contracts.md).
 
 ## Secrets
 

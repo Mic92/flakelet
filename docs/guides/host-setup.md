@@ -69,20 +69,15 @@ the path exists before deploying.
 ## Private flakes
 
 Fetching happens on the machine at runtime, as the `flakelet` user. Give
-it credentials as files:
+it credentials as files it can read:
 
 ```nix
-services.flakelets.credentials = {
-  # https: either a netrc file …
-  netrcFile = config.sops.secrets.flakelet-netrc.path;
-  # … or "github.com=ghp_…" lines
-  accessTokensFile = config.sops.secrets.flakelet-tokens.path;
-  # git+ssh://
-  sshKeyFile = config.sops.secrets.flakelet-deploy-key.path;
-  sshKnownHostsFile = "/etc/ssh/ssh_known_hosts";
-};
+services.flakelets.credentials.netrcFile = config.sops.secrets.flakelet-netrc.path;
 sops.secrets.flakelet-netrc.owner = "flakelet";
 ```
+
+Access tokens and ssh deploy keys work the same way, see
+[`credentials.*`](../reference/host-options.md).
 
 ## Static users
 
@@ -151,17 +146,9 @@ See the [contracts reference](../reference/contracts.md) for what exists.
 
 ## Operating
 
-```console
-$ flakelet update web              # deploy now instead of waiting for the timer
-$ flakelet diff web                # what would change
-$ flakelet rollback web            # previous generation
-$ flakelet lock web                # stay on this revision until `unlock`
-$ flakelet update web --force      # retry after a failed deploy put it on hold
-$ flakelet disable web -m 'why'   # keep it stopped across updates and reboots
-$ flakelet enable web              # start it again
-$ journalctl -u flakelet-web -u web
-```
-
-A failed deploy rolls back and puts the service on hold so the timer does
-not retry the same broken inputs. `flakelet status` shows the reason. All
-commands are in the [CLI reference](../reference/cli.md).
+`flakelet status` is the starting point. A failed deploy rolls back and
+puts the service on hold so the timer does not retry the same broken
+inputs; `status` shows the reason and `update --force` retries. To keep a
+service stopped across updates and reboots use `flakelet disable`, not
+`systemctl stop`. Everything else is in the
+[CLI reference](../reference/cli.md).
