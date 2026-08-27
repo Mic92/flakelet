@@ -395,8 +395,9 @@ runs reconcile through a unit that restarts whenever config.json changes, and
 ## Update flow
 
 Boot comes first. `flakelet-boot.service` re-links the current generations
-into `/run/systemd/system` and sweeps any stale flakelet-managed symlinks a
-crash may have left behind. It runs before `flakelet.target`, so other host
+into `/run/systemd/system` and queues start jobs for their `[Install]`
+units (`--no-block`, since it runs inside the boot transaction, which was
+computed before these units existed). It runs before `flakelet.target`, so other host
 units that want to order themselves after "the flakelet services are up" can
 depend on that target. The boot unit needs no evaluation and no network,
 which matters for machines that boot while offline.
