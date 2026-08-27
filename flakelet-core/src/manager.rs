@@ -1003,6 +1003,13 @@ impl Manager {
         };
         let generation = gens.create(&manifest, &extra_roots)?;
 
+        exports::provision(
+            name,
+            &artifact.exports,
+            &self.config.providers_dir,
+            &self.service_dir(name),
+        )?;
+
         eprintln!("{name}: activating generation {generation}");
         let previous_units = st.units.clone();
         let result =

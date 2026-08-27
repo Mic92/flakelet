@@ -79,10 +79,13 @@ Local socket, peer authentication, no password. The service connects as
 - One provider per contract per host, announced in
   `/etc/flakelet/providers.d/<anything>.json`:
   `{ "contract": "postgres/v1" }`. Unknown keys are ignored. `check` and
-  `status` warn about claims without an announcer; enforcement is a failed
-  start plus `Restart=`.
-- Level-triggered: `PathChanged=/run/flakelet/exports`, then reconcile
-  everything.
+  `status` warn about claims without an announcer.
+- Optional `"provision": "<exe>"`, called as `<exe> <claim.json>` per claim
+  before the units of a new generation start. A non-zero exit fails the
+  update before any unit is touched.
+- Providers that need to converge on removal (vhosts) or have no
+  `provision` hook watch `/run/flakelet/exports` level-triggered and
+  reconcile from the whole directory.
 - Provisioning is idempotent and add-only. Nothing is dropped on
   `remove`; orphans are listed by the provider and deleted by humans.
   Stateless renderings (vhosts) do converge, which is why `remove` deletes
