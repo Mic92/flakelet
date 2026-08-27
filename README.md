@@ -78,7 +78,7 @@ Background
 | Contract      | Implementation                                                    | export/import |
 | ------------- | ----------------------------------------------------------------- | ------------- |
 | `http/v1`     | [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)         | stateless     |
-| `postgres/v1` | [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)   | not yet       |
+| `postgres/v1` | [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)   | yes           |
 
 ## Real-world examples
 
