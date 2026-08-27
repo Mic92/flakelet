@@ -183,7 +183,10 @@ let
       // (def.environment or { });
     in
     section "Service" (
-      (def.serviceConfig or { })
+      # exec instead of systemd's simple: a missing binary or User= then
+      # fails the start job and with it the deploy.
+      { Type = "exec"; }
+      // (def.serviceConfig or { })
       // lib.optionalAttrs (env != { }) {
         # toJSON escapes quotes and backslashes in values.
         Environment = lib.mapAttrsToList (k: v: builtins.toJSON "${k}=${toValue v}") env;
