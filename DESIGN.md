@@ -93,36 +93,6 @@ attrset of them. Each module returns up to two things:
 - `exports` (optional): metadata about what the service provides, described
   in its own section below.
 
-Health is expressed in the units themselves rather than in a flakelet-owned
-mechanism, because systemd already supervises starts with timeouts, journal
-logging and sandboxing. Readiness belongs in the service unit: `Type=notify`
-or an `ExecStartPost=` probe makes the start job fail when the service does
-not come up, and a failed start job rolls the activation back. For a deeper
-probe the service ships a `<name>-health.service` oneshot unit; flakelet
-starts it after every activation and a non-zero result triggers the
-rollback. The probe is a normal unit of the generation: it is gc-rooted with
-it, a rollback rolls back to the matching probe, `TimeoutStartSec=` bounds
-it, retries are ordinary probe options, and an operator can run it by hand at
-any time with `systemctl start`. The check is shipped by the service rather
-than configured on the host, because the service knows best how to probe
-itself. Ongoing liveness after activation is systemd's job, via `Restart=`
-and `WatchdogSec=`.
-
-Persistent state follows the same idea: the unit files already say where it
-lives. `StateDirectory=` is what `flakelet export` carries to another
-machine, `CacheDirectory=`, `RuntimeDirectory=` and `LogsDirectory=` are
-not, and `User=`/`DynamicUser=` tell the importing side who must own it.
-`flakelet.lib` reads these from the structured `services.*.serviceConfig`
-at evaluation time and writes a `state.json` into the artifact, so core
-never parses unit files and a CI build sees the same description. A service
-that needs to serialise something before its folders are copied ships a
-`<name>-dump.service` oneshot (sugar: `dumpScript`), one that needs to load
-it afterwards a `<name>-restore.service` (`restoreScript`). Like the
-`healthCheck` sugar, both run as the main unit's user with its
-`StateDirectory=`. They run while the other units are stopped, and must not read or write outside those folders. State outside
-the directives is listed in `exports.state.extraFolders`, which requires a
-static `User=`.
-
 All units of one entry form one generation. They are activated together and
 rolled back together, so a service consisting of a `.service` and a `.socket`
 never ends up half-updated.
@@ -140,6 +110,53 @@ hardening come from ordinary unit directives such as `DynamicUser=`,
 `ProtectSystem=` and `PrivateTmp=`. Because the nix store is shared with the
 host, dependencies that the host already has are not downloaded or stored a
 second time.
+
+### Health checks
+
+Health lives in the units, not in a flakelet-owned mechanism. systemd
+already supervises starts with timeouts, journal logging and sandboxing.
+
+Readiness belongs in the service unit. `Type=notify` or an `ExecStartPost=`
+probe makes the start job fail when the service does not come up. A failed
+start job rolls the activation back. Liveness after activation is
+systemd's job too, via `Restart=` and `WatchdogSec=`.
+
+For a deeper probe the service ships a `<name>-health.service` oneshot
+(sugar: `healthCheck`). flakelet starts it after every activation. A
+non-zero result triggers the rollback. The sugar runs the probe as the main
+unit's user with `TimeoutStartSec=1min`.
+
+The probe is a normal unit of the generation. It is gc-rooted with it and a
+rollback rolls back to the matching probe. `TimeoutStartSec=` bounds it.
+Retries are ordinary options of the probe command. An operator can run it
+by hand with `systemctl start <name>-health`.
+
+The check is shipped by the service rather than configured on the host,
+because the service knows best how to probe itself.
+
+### State
+
+Persistent state follows the same idea: the unit files already say where
+it lives. `StateDirectory=` is what `flakelet export` carries to another
+machine. `CacheDirectory=`, `RuntimeDirectory=` and `LogsDirectory=` are
+not carried. `User=`/`DynamicUser=` tell the importing side who must own
+it.
+
+`flakelet.lib` reads these from the structured `services.*.serviceConfig`
+at evaluation time and writes a `state.json` into the artifact. Core never
+parses unit files, and a CI build sees the same description.
+
+A service that needs to serialise something before its folders are copied
+ships a `<name>-dump.service` oneshot (sugar: `dumpScript`). One that needs
+to load it afterwards ships a `<name>-restore.service` (`restoreScript`).
+Like `healthCheck`, both sugars run as the main unit's user with its
+`StateDirectory=`. They run while the other units are stopped and must not
+read or write outside those folders.
+
+State outside the directives is listed in `exports.state.extraFolders`.
+That requires a static `User=`, because a dynamic uid cannot own paths
+outside `/var/lib`. The full transfer procedure is described under
+"Export and import" below.
 
 ### Activation of native units
 
