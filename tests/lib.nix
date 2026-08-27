@@ -184,6 +184,12 @@ assert fails (
     impl = _: { };
   }) { settings = { }; }
 );
+# Unknown settings are rejected even when impl never reads options.
+assert fails (
+  (flakeletLib.evalModule (_: {
+    impl = _: { services.web.serviceConfig.ExecStart = "/bin/true"; };
+  }) { settings.typo = 1; }).units
+);
 assert builtins.hasContext helloPath;
 assert
   result.state == {

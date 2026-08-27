@@ -242,7 +242,9 @@ rec {
           fail "missing required setting '${n}'";
     in
     if unknown != [ ] then
-      fail "unknown setting(s) ${lib.concatStringsSep ", " unknown}; known: ${lib.concatStringsSep ", " (lib.attrNames options)}"
+      fail "unknown setting(s) ${lib.concatStringsSep ", " unknown}; the module declares ${
+        if options == { } then "none" else lib.concatStringsSep ", " (lib.attrNames options)
+      }"
     else
       lib.mapAttrs (n: decl: value n (checkDecl n decl)) options;
 
@@ -262,9 +264,13 @@ rec {
     if m ? inputs then
       fail "module inputs are not supported; pkgs, name and helpers are injected into impl"
     else
-      render (
+      let
+        options = evalOptions (m.options or { }) settings;
+      in
+      # impl may never touch options, the settings must still be checked.
+      builtins.deepSeq options render (
         m.impl {
-          options = evalOptions (m.options or { }) settings;
+          inherit options;
           inherit
             pkgs
             name
