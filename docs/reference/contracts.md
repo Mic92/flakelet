@@ -92,9 +92,13 @@ The file name does not matter. Unknown keys are ignored.
 }
 ```
 
-Only `contract` is required. `check` and `status` warn about claims that
-no file announces. flakelet runs the hooks as root, once per
-`requires.<contract>` claim:
+`contract` is the only required key. It tells flakelet that claims under
+`requires.postgres` are handled on this host; `flakelet check` and
+`flakelet status` warn when a service claims something nobody handles.
+
+The other keys are hooks. flakelet runs each hook as root, once for every
+service that has a matching `requires.*` claim, and passes that claim as a
+JSON file:
 
 | hook            | called as                  | when                                     |
 | --------------- | -------------------------- | ---------------------------------------- |
