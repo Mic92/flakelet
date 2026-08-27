@@ -41,7 +41,7 @@ for existence before each update.
 | ----------------------------- | ---- |
 | `flakelet-boot.service`       | relinks current generations into `/run/systemd/system` before `flakelet.target`; no network, no eval |
 | `flakelet-reconcile.service`  | removes declarative entries that vanished from config.json; restarts when config.json changes; ordered before the per-service units |
-| `flakelet-<name>.service`     | oneshot `flakelet update --offline-fallback <name>`; restarts when the entry changes; after `flakelet-reconcile` and `flakelet-providers.target`, before `flakelet.target`; `Nice=10`, `IOSchedulingClass=idle`, `MemoryHigh=75%` |
-| `flakelet-<name>.timer`       | with `autoUpdate.enable` |
+| `flakelet-<name>.service`     | oneshot `flakelet update --offline-fallback <name>`; ordered after `network.target`, restarted with backoff on exit 75; restarts when the entry changes; after `flakelet-reconcile` and `flakelet-providers.target`, before `flakelet.target`; `Nice=10`, `IOSchedulingClass=idle`, `MemoryHigh=75%` |
+| `flakelet-<name>-auto.timer`, `.service` | with `autoUpdate.enable`, runs `flakelet update --offline-fallback --no-wait <name>` |
 | `flakelet.target`             | reached after boot relinking; order host units after it |
 | `flakelet-providers.target`   | pulled in before every `flakelet-<name>.service`; providers add `wants`/`after` on their backing service so `provision` hooks work at boot |

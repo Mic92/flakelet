@@ -50,6 +50,7 @@ See [Moving a service](../guides/moving-a-service.md).
 
 ## Exit status
 
-Non-zero on any failure, including a deploy that was rolled back. With
-`--offline-fallback` a network failure during evaluation is exit 0 and
-marks the entry degraded.
+Non-zero on any failure, including a deploy that was rolled back. Network
+errors exit 75 (`EX_TEMPFAIL`) so a service manager can retry just those;
+with `--offline-fallback` and an existing generation they exit 0 and mark
+the entry degraded instead.
