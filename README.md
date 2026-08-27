@@ -81,25 +81,100 @@ socket-activated service starts on the first connection, a timer's job runs
 on its schedule, not at deploy time. Changed units that are running are
 restarted either way.
 
-Health lives in the units: `Type=notify` or `ExecStartPost=` for readiness,
-`Restart=` for liveness. A service can additionally ship a
-`<name>-health.service` oneshot (or return `healthCheck`);
-flakelet starts it after every activation and rolls back when it fails.
-The impl can also return `exports`,
-free-form metadata like claimed ports or metrics endpoints. flakelet publishes
-the exports of the running generation to `/run/flakelet/exports/<name>.json`,
-where firewall, reverse-proxy or monitoring tooling can pick them up.
-
-State needs no declaration: `StateDirectory=` and `User=`/`DynamicUser=`
-already say what to carry and who owns it, so `flakelet export web | ssh
-hostb flakelet import -` moves a service including its data. Services that
-must serialise something first ship a `<name>-dump.service` /
-`<name>-restore.service` oneshot (or return `dumpScript`/`restoreScript`);
-databases behind `requires.postgres` are dumped by the provider, not the
-service.
+The impl can also return `exports`, free-form metadata like claimed ports
+or metrics endpoints. flakelet publishes the exports of the running
+generation to `/run/flakelet/exports/<name>.json`, where firewall,
+reverse-proxy or monitoring tooling can pick them up.
 
 The template in `templates/service/flake.nix` shows all of this. DESIGN.md
 describes the full contract.
+
+## Health checks
+
+Use systemd for readiness and liveness. `Type=notify` or `ExecStartPost=`
+fail the start job if the service does not come up. A failed start job
+rolls the activation back. `Restart=` and `WatchdogSec=` keep the service
+alive afterwards.
+
+For an end-to-end probe, return `healthCheck`. flakelet runs it as
+`<name>-health.service` after every activation. If it fails, flakelet
+rolls back:
+
+```nix
+impl = { options, pkgs, name, ... }: {
+  services.${name} = { … };
+
+  healthCheck = pkgs.writeShellScript "${name}-health" ''
+    exec ${pkgs.curl}/bin/curl -sf --retry 5 --retry-connrefused --retry-delay 2 \
+      http://127.0.0.1:${toString options.port}/ -o /dev/null
+  '';
+};
+```
+
+`healthCheck` expands to a oneshot with `DynamicUser=` and
+`TimeoutStartSec=1min`. That is not always enough. The probe may need
+credentials, a specific user or a longer timeout. In that case write
+`services.health` yourself:
+
+```nix
+services.health = {
+  serviceConfig = {
+    Type = "oneshot";
+    ExecStart = "${pkgs.myservice}/bin/selftest --socket /run/${name}/api.sock";
+    User = name;
+    TimeoutStartSec = "5min";
+    LoadCredential = "token:/run/secrets/${name}-token";
+  };
+};
+```
+
+Rerun it by hand with `systemctl start myservice-health`.
+
+## State
+
+flakelet reads state from the unit. `StateDirectory=` is copied.
+`User=`/`DynamicUser=` owns it. `CacheDirectory=`, `RuntimeDirectory=`
+and `LogsDirectory=` are left behind.
+
+This moves a service with its data to another machine:
+
+```console
+$ flakelet export web | ssh hostb flakelet import -
+```
+
+`export` stops the units. It archives the state folders, the artifact and
+the settings. Then it starts the service again. `import` unpacks the
+archive and fixes ownership. Then it activates the service and runs the
+health probe.
+
+Some state cannot be copied as-is. To serialise it before the copy,
+return `dumpScript`. To load it afterwards, return `restoreScript`. Both
+run as the main unit's user with its `StateDirectory=`. The other units
+are stopped while they run:
+
+```nix
+impl = { pkgs, name, ... }: {
+  services.${name}.serviceConfig = {
+    ExecStart = "${pkgs.myservice}/bin/serve --db /var/lib/${name}/db.sqlite";
+    DynamicUser = true;
+    StateDirectory = name;
+  };
+
+  # flush the WAL so the copied file is consistent
+  dumpScript = pkgs.writeShellScript "${name}-dump" ''
+    ${pkgs.sqlite}/bin/sqlite3 /var/lib/${name}/db.sqlite 'PRAGMA wal_checkpoint(TRUNCATE);'
+  '';
+  # rebuild derived data instead of shipping it
+  restoreScript = pkgs.writeShellScript "${name}-restore" ''
+    ${pkgs.myservice}/bin/reindex --db /var/lib/${name}/db.sqlite
+  '';
+};
+```
+
+`dumpScript` and `restoreScript` generate a `<name>-dump.service` and
+`<name>-restore.service` oneshot for you. If you need other unit settings,
+define `services.dump` or `services.restore` yourself instead, as shown
+for `services.health` above.
 
 ## CLI
 
