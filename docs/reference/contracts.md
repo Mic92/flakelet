@@ -121,12 +121,14 @@ Extend host services only through append-safe merge points (nginx
 }
 ```
 
-Optional. They make the provider's resource part of
-[`flakelet export`/`import`](../guides/moving-a-service.md); without them
-services with this claim cannot be exported. Both are called as
+Each is optional. They make the provider's resource part of
+[`flakelet export`/`import`](../guides/moving-a-service.md). A provider
+whose claim carries no data (a DNS record, an OIDC client) defines
+neither and `provision` on the target recreates it. Both are called as
 `<exe> <claim.json> <dir>`: `dump` writes the resource into `<dir>` while
 the service is stopped, `restore` reads it back on the target before the
-first activation. `restore` creates the resource if absent and refuses a
+first activation. `import` refuses an archive with data for a claim that
+no provider on the target can restore. `restore` creates the resource if absent and refuses a
 non-empty one, unless `FLAKELET_REPLACE=1` is set (`import --replace`),
 in which case it may drop and recreate it.
 

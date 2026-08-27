@@ -175,7 +175,9 @@ pub fn unpack(archive: &Path, dir: &Path) -> Result<()> {
     )
 }
 
-/// Run each provider's dump (or restore) for the `requires.*` claims.
+/// Run each provider's dump (or restore) hook for the `requires.*`
+/// claims, where the provider has one. A dump in the archive without a
+/// restore hook on this host is an error rather than dropped data.
 pub fn provider_hooks(
     exports: &Value,
     providers_dir: &Path,
@@ -188,22 +190,27 @@ pub fn provider_hooks(
     };
     let providers = exports::providers(providers_dir).unwrap_or_default();
     for (claim, body) in requires {
-        let Some(hooks) = providers
+        let hooks = providers
             .iter()
             .find(|p| p.claim() == claim)
-            .and_then(|p| p.state.as_ref())
-        else {
-            return Err(Error::NotTransferable {
-                service: claim.clone(),
-                verb: if restore { "restored" } else { "dumped" },
-                reasons: vec![format!("no provider with state hooks for requires.{claim}")],
-            });
-        };
+            .and_then(|p| p.state.as_ref());
+        let hook = hooks.and_then(|h| if restore { &h.restore } else { &h.dump }.as_ref());
         let sub = dir.join("requires").join(claim);
+        let Some(hook) = hook else {
+            if restore && sub.exists() {
+                return Err(Error::NotTransferable {
+                    service: claim.clone(),
+                    verb: "restored",
+                    reasons: vec![format!(
+                        "archive carries requires.{claim} data but no provider here can restore it"
+                    )],
+                });
+            }
+            continue;
+        };
         fs::create_dir_all(&sub).map_err(Error::io(format!("create {}", sub.display())))?;
         let claim_file = sub.join("claim.json");
         write_json_atomic(&claim_file, body)?;
-        let hook = if restore { &hooks.restore } else { &hooks.dump };
         eprintln!("requires.{claim}: running {}", hook.display());
         let env: &[(&str, &str)] = if replace {
             &[("FLAKELET_REPLACE", "1")]

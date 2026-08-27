@@ -41,8 +41,8 @@ pub struct Provider {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ProviderState {
-    pub dump: std::path::PathBuf,
-    pub restore: std::path::PathBuf,
+    pub dump: Option<std::path::PathBuf>,
+    pub restore: Option<std::path::PathBuf>,
 }
 
 impl Provider {

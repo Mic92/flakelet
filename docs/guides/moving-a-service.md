@@ -79,8 +79,9 @@ does hold the service's data.
 
 A service with `exports.requires.postgres` does not dump the database
 itself. `export` calls the postgres provider's dump hook and `import` its
-restore hook, which also creates the database on the target. Both hosts'
-providers must announce `state` support; `--dry-run` tells.
+restore hook, which also creates the database on the target. A provider
+without hooks contributes nothing to the archive; an archive that carries
+provider data the target cannot restore is refused.
 
 ## Static users
 

@@ -356,7 +356,7 @@ impl Manager {
             };
             match self.current(&name, &st) {
                 Ok(cur) => {
-                    status.export_blockers = self.export_blockers(&st, cur.as_ref(), false);
+                    status.export_blockers = self.export_blockers(&st, cur.as_ref());
                     if let Some(m) = cur {
                         status.failed_units = systemd::failed(&m.units).unwrap_or_default();
                         status.missing_providers =
@@ -373,21 +373,11 @@ impl Manager {
         Ok(result)
     }
 
-    fn export_blockers(
-        &self,
-        st: &State,
-        current: Option<&Manifest>,
-        need_restore: bool,
-    ) -> Vec<String> {
+    fn export_blockers(&self, st: &State, current: Option<&Manifest>) -> Vec<String> {
         let Some(m) = current else {
             return vec!["never deployed".into()];
         };
-        let mut b = svcstate::blockers(
-            m.state.as_ref(),
-            &m.exports,
-            &self.config.providers_dir,
-            need_restore,
-        );
+        let mut b = svcstate::blockers(m.state.as_ref(), &m.exports, &self.config.providers_dir);
         if st.degraded {
             b.push("running a degraded (cached) generation".into());
         }
@@ -694,7 +684,7 @@ impl Manager {
         let (svc, _) = self.service(name)?;
         let st = State::load(&self.state_path(name))?;
         let current = self.current(name, &st)?;
-        let reasons = self.export_blockers(&st, current.as_ref(), false);
+        let reasons = self.export_blockers(&st, current.as_ref());
         if !reasons.is_empty() {
             return Err(Error::NotTransferable {
                 service: name.into(),
@@ -836,7 +826,7 @@ impl Manager {
         need_empty: bool,
     ) -> Result<()> {
         let mut reasons =
-            svcstate::blockers(Some(state), exports, &self.config.providers_dir, true);
+            svcstate::blockers(Some(state), exports, &self.config.providers_dir);
         for f in &state.folders {
             let real = transfer::real_path(f);
             if need_empty && !transfer::is_empty_dir(&real) {
