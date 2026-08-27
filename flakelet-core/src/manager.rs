@@ -1129,7 +1129,8 @@ fn validate_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     let ok = name.len() <= 128
         && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        // No '.': the name is a driver attribute and nix-eval-jobs quotes dots.
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
     if ok {
         Ok(())
     } else {
@@ -1322,7 +1323,7 @@ mod tests {
 
     #[test]
     fn service_names_are_validated() {
-        for ok in ["web", "my-app", "a.b_c2"] {
+        for ok in ["web", "my-app", "a_c2"] {
             assert!(validate_name(ok).is_ok(), "{ok}");
         }
         for bad in [
@@ -1331,6 +1332,7 @@ mod tests {
             "a b",
             "a/b",
             ".hidden",
+            "a.b",
             "-x",
             "a\nb",
             &"a".repeat(129),

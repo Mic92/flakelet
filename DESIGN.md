@@ -127,8 +127,8 @@ All units of one entry form one generation. They are activated together and
 rolled back together, so a service consisting of a `.service` and a `.socket`
 never ends up half-updated.
 
-Unit names must start with the entry name. flakelet enforces this and refuses
-to activate a unit name that already belongs to another managed service or to
+Entry names consist of letters, digits, `-` and `_`. Unit names must
+start with the entry name. flakelet enforces this and refuses to activate a unit name that already belongs to another managed service or to
 the host itself, because silently overriding someone else's unit would be a
 debugging nightmare. The supported unit types are `.service`, `.socket`,
 `.target`, `.timer` and `.path`. Mounts and users are host concerns; if a
