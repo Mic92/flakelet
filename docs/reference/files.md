@@ -12,7 +12,7 @@ newest intact generation.
 | `/etc/flakelet/providers.d/*.json` | provider modules | `{ "contract": "postgres/v1", "state"?: { "dump", "restore" } }` |
 | `/var/lib/flakelet/<name>/service.json` | `deploy`, `import` | manual entry; same shape as one `services.<name>` in config.json |
 | `/var/lib/flakelet/<name>/state.json` | every mutating command, atomically | what is deployed now |
-| `/var/lib/flakelet/<name>/lock`, `/var/lib/flakelet/lock` | flock | holder description |
+| `/var/lib/flakelet/<name>/lock`, `/var/lib/flakelet/lock` | flock | holder description; per-entry exclusive, global shared (exclusive for `gc`), taken global-then-entry. `status`/`diff` take none |
 | `/var/cache/flakelet/` | eval user | nix eval/fetch cache |
 | `/nix/var/nix/gcroots/flakelet/<name>/gen-<N>/` | update/activate | `manifest.json` + `root-*` symlinks: unit files, export drvs, settings store paths, driver, flake source and inputs |
 | `/run/systemd/system/<unit>` | activation, `boot` | symlinks into the current generation |
@@ -62,8 +62,10 @@ newest intact generation.
 }
 ```
 
-A hold is skipped by `update` until `settings_hash` or `flake_rev` differ
-or `--force` is given.
+`hold` is set when a deploy was rolled back. `update` skips a held entry
+until the current `settings_hash` or `flake_rev` differ from the recorded
+ones, or `--force` is given. `degraded` is set by `--offline-fallback` when
+evaluation failed on the network and the previous units were kept.
 
 ## manifest.json (per generation)
 

@@ -54,7 +54,8 @@ services.flakelets.services = {
 
 ## Secrets
 
-Settings are world-readable in the nix store. Pass paths, not values:
+Settings end up world-readable in the nix store, so a secret goes in as
+the path to a file the host manages:
 
 ```nix
 sops.secrets.web-token.owner = "root";
@@ -131,10 +132,8 @@ machine does, and add `--build` to fill the binary cache:
 ```console
 $ flakelet check --machine eve            # eval only
 $ flakelet check --machine eve --build    # also build
+$ flakelet check --machine eve --flake github:me/infra
 ```
-
-`--machine` reads `nixosConfigurations.eve` from the flake in the current
-directory (`--flake <ref>` for another one).
 
 ## Providers
 
@@ -161,6 +160,6 @@ $ flakelet update web --force      # retry after a failed deploy put it on hold
 $ journalctl -u flakelet-web -u web
 ```
 
-A failed deploy rolls back and puts the service on hold. The hold clears
-by itself when the settings or the flake revision change. The full list
-of commands is in the [CLI reference](../reference/cli.md).
+A failed deploy rolls back and puts the service on hold so the timer does
+not retry the same broken inputs; `flakelet status` shows the reason. All
+commands are in the [CLI reference](../reference/cli.md).

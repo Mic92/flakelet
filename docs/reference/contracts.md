@@ -25,7 +25,7 @@ host to own the socket ships a `.socket` unit instead.
 ```
 
 Absolute, non-store paths carried by `export` in addition to
-`StateDirectory=`. Requires a static `User=` on the main unit. See
+`StateDirectory=`. Constraints in the
 [service module reference](service-module.md#derived-state-description).
 
 ## Blessed descriptions (schema in this repo)
