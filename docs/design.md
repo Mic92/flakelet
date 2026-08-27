@@ -32,7 +32,7 @@ The moving parts are deliberately few:
 ## Service contract
 
 The shape is documented in the
-[service module reference](reference/service-module.md); here are the
+[service module reference](reference/service-module.md). Here are the
 reasons behind it.
 
 `impl` is dependency-injected and service flakes have no inputs. The host
@@ -40,7 +40,7 @@ decides which nixpkgs a service is built against, so a host upgrade
 delivers security fixes to every service without their authors doing
 anything, and one evaluation of nixpkgs is shared by the whole batch. The
 flip side is that bumping the host's nixpkgs rebuilds and restarts every
-service on the next update; a service that must not follow the host pins
+service on the next update. A service that must not follow the host pins
 its own via `inputOverrides.nixpkgs`. Other input names are rejected,
 because `builtins.getFlake` cannot rewrite a flake's own lock purely.
 Everything a service needs beyond `pkgs` must therefore be injectable,
@@ -71,7 +71,7 @@ Entry names consist of letters, digits, `-` and `_`. Unit names must
 start with the entry name. flakelet enforces this and refuses to activate a unit name that already belongs to another managed service or to
 the host itself, because silently overriding someone else's unit would be a
 debugging nightmare. The supported unit types are `.service`, `.socket`,
-`.target`, `.timer` and `.path`. Mounts and users are host concerns; if a
+`.target`, `.timer` and `.path`. Mounts and users are host concerns. If a
 service needs them it references them through settings. Where possible,
 services should rely on `DynamicUser=` and `StateDirectory=` instead.
 
@@ -96,7 +96,7 @@ the start job and `Restart=`/`WatchdogSec=`.
 The probe is shipped by the service rather than configured on the host,
 because the service knows best how to probe itself. The sugar gives it
 the main unit's identity because probes that talk to a `0660` socket or
-run a read-only self-test are the common case; a black-box probe from an
+run a read-only self-test are the common case. A black-box probe from an
 unrelated user is the one to spell out.
 
 ### State is derived from the units
@@ -144,7 +144,7 @@ small "driver" expression, adds that file to the nix store and evaluates it
 with nix-eval-jobs. The driver pins everything: the nixpkgs source path comes
 from the host configuration, the flake reference is fully locked including
 its narHash, and the settings are embedded as Nix values. This is what makes
-the evaluation pure; no `--impure` flag is needed anywhere.
+the evaluation pure. No `--impure` flag is needed anywhere.
 
 ```nix
 # /nix/store/…-flakelet-driver.nix (generated per update), abridged
@@ -171,7 +171,7 @@ An update of a service walks through the following steps:
    services or from service.json for manually deployed ones. Verify that any
    store paths mentioned in the settings actually exist. Resolve the flake
    reference to a locked URL with revision and narHash using
-   `nix flake metadata`; if the operator pinned the service with
+   `nix flake metadata`. If the operator pinned the service with
    `flakelet lock`, the pin wins. An `inputOverrides.nixpkgs` entry is
    resolved the same way and replaces the pkgs instance for that entry.
 2. Render the driver expression and add it to the store with `nix store add`,
@@ -197,7 +197,7 @@ other build on the machine. Only the systemctl steps at the end run as root.
 
 Evaluating nixpkgs is not free, so resource usage is bounded: one
 nix-eval-jobs worker by default, because the batch shares one nixpkgs
-instance and more workers mostly cost memory; a memory limit derived from
+instance and more workers mostly cost memory. A memory limit derived from
 RAM; and the update units run niced with `MemoryHigh` and idle I/O so a
 scheduled update cannot starve the services already running.
 
@@ -205,7 +205,7 @@ One subtlety about settings that contain store paths: a string like
 `/nix/store/…-cert.pem` inside the settings has no string context, so the
 built artifact does not depend on it and nix would happily garbage-collect
 it. flakelet therefore checks that such paths exist before evaluating and
-gc-roots them per generation; `storePath` exists for the rarer case where
+gc-roots them per generation. `storePath` exists for the rarer case where
 the build itself must read the file (`builtins.appendContext`, since
 `builtins.storePath` is banned in pure evaluation). Secret paths outside
 the store are checked for existence too but obviously not rooted.
@@ -224,10 +224,10 @@ in `ps`. Manual services live in their own `service.json` so they survive
 host rebuilds that know nothing about them.
 
 Generation directories under the gcroots are the single mechanism behind
-rollback, gc and multi-unit atomicity; there is no database to fall out of
+rollback, gc and multi-unit atomicity. There is no database to fall out of
 sync with them. `/run/flakelet/exports` is re-published on activation,
 boot and removal so consumers never read metadata of a generation that is
-not running. Files carry a version; flakelet migrates old ones and refuses
+not running. Files carry a version. flakelet migrates old ones and refuses
 newer ones, because guessing about an unknown format is how state gets
 destroyed. Corrupt state makes mutating commands demand `--force`, which
 rebuilds from the newest intact generation.
@@ -242,7 +242,7 @@ it as a new generation, link the units, run the health probe, publish the
 exports. Because activation only needs the artifact and nothing else, it also
 works when someone else already built it. `flakelet activate <name> <store
 path>` does exactly that, and a declarative service can set `prebuilt`
-instead of `flake` and `settings`; the two are mutually exclusive. This is
+instead of `flake` and `settings`. The two are mutually exclusive. This is
 how CI-primed deployments and tests avoid running any evaluation on the
 target machine, while `meta.json` keeps the provenance visible in
 `flakelet status`.
@@ -255,12 +255,12 @@ name, the declarative definition wins and flakelet warns about the shadowed
 manual one.
 
 `flakelet remove <name>` deactivates the units, prunes all generations and
-deletes flakelet's bookkeeping for the entry; the service's own
+deletes flakelet's bookkeeping for the entry. The service's own
 `StateDirectory=` is left alone unless `--purge`, because deleting data
 should never be a side effect of a rename in the host configuration.
 `flakelet reconcile` looks for services whose
 state says they were declarative but which no longer appear in config.json,
-and removes them; this is what cleans up after a service is renamed or
+and removes them. This is what cleans up after a service is renamed or
 deleted in the host configuration. Manual services are never touched by
 reconcile, since no declarative source of truth exists for them. The module
 runs reconcile through a unit that restarts whenever config.json changes, and
@@ -330,7 +330,7 @@ oneshots while a deploy is in flight. File locks keep this safe.
 Every mutating operation takes a per-service flock at
 `<state_dir>/<name>/lock`. The lock file records who holds it, so a waiting
 process can tell the operator what it is waiting for. Waiting is the
-default; `--no-wait` makes the attempt fail immediately for scripts that
+default. `--no-wait` makes the attempt fail immediately for scripts that
 prefer that. The generated units simply wait: systemd never runs the same
 oneshot twice concurrently, so timer ticks cannot pile up behind each
 other, and a host activation that changed settings should apply once the
@@ -353,7 +353,7 @@ state, so the same code path runs on a developer laptop or in CI
 `--machine` feeds a NixOS configuration's rendered config.json into the
 normal driver path instead of inventing a second evaluation mode. Flake
 references resolve at check time, so CI sees what a machine would deploy
-right now; pinning revisions for pull-request CI is a follow-up. A build
+right now. Pinning revisions for pull-request CI is a follow-up. A build
 farm running these primes the binary cache so machines only download.
 Manual services can only be checked on their machine, because only that
 machine knows about them.
@@ -363,7 +363,7 @@ machine knows about them.
 The Rust workspace has two crates. `flakelet-core` is a library containing
 the config and state types, driver generation, locking, evaluation, build,
 activation, rollback, gc and health probes. It is blocking code with no
-global state, so it can be embedded elsewhere; a future web service for
+global state, so it can be embedded elsewhere. A future web service for
 remote deploy triggers would link it directly, and the file locks already
 make the CLI and such a service safe to run side by side on one machine.
 `flakelet` is a thin binary on top, with argument parsing done by lexopt.
@@ -427,7 +427,7 @@ exports always runs code matching the generation that is actually running.
 
 A few schemas are blessed (listed in the
 [contracts reference](reference/contracts.md)) so consumers can rely on
-their shape. The service declares what it provides; policy questions such
+their shape. The service declares what it provides. Policy questions such
 as zones, public host names, TLS and who may reach the service stay on the
 host side, in the consumers. `ports` is the one export core acts on: two
 daemons fighting over one port is better caught before either of them is
@@ -437,7 +437,7 @@ flakelet only publishes this data. The consumers are separate projects:
 Prometheus file_sd, telegraf or Alloy rendering for metrics, nftables sets or
 ufw rules for the firewall, the Caddy admin API or nginx snippets for the
 proxy. Backup adapters build on the export machinery described below. The health of
-flakelet itself needs no exports; it is visible through unit state,
+flakelet itself needs no exports. It is visible through unit state,
 `flakelet status --json` and journal MESSAGE_IDs.
 
 ## Contracts and providers
@@ -466,7 +466,7 @@ deterministic, so the consumer bakes the outcome into its config at
 evaluation time, as the `ExecStart` above does. `postgres/v1` means local
 socket peer authentication — no password exists. Negotiated values
 (allocated ports, generated passwords, remote databases) are out of v1 on
-purpose; the provision/bind handshake of the Open Service Broker lineage is
+purpose. The provision/bind handshake of the Open Service Broker lineage is
 the complexity this design avoids.
 
 Providers run on the host, typically as NixOS modules, because they own
@@ -500,10 +500,10 @@ decisions:
 
 Contracts inherit the version 1 trust model: services may claim any domain
 or database name, which is also what lets blue/green instances share one
-database. Providers still validate exports against the schema; that is a
+database. Providers still validate exports against the schema. That is a
 guard against malformed claims and no security boundary. If multi-tenancy
 ever arrives, provider-side
-grant options are the extension point; flakelet core would not change.
+grant options are the extension point. flakelet core would not change.
 
 Where a contract lives follows one criterion: whether services reach it
 through the injected module arguments (service flakes are input-free, so
@@ -516,16 +516,16 @@ in their implementation's repository (`flakelet-postgres`), because their
 hard parts — add-only provisioning, orphans, rollback interplay — are
 inseparable from the provider, and the family is open-ended (redis,
 s3, …) while claims are plain attrsets needing no constructor. The JSON
-shape is the interface in all cases; a provider in any language validates
+shape is the interface in all cases. A provider in any language validates
 against the schema file, never against Nix code. Schema changes require a
-working implementation and a real consumer; recurring `extra.<impl>` keys
+working implementation and a real consumer. Recurring `extra.<impl>` keys
 are the promotion signal for new typed fields.
 
 Providers are guests in host services, never owners: they extend only through
 append-safe merge points (an nginx include directive, SQL-level
 provisioning) and must compose with an existing `services.nginx` or
 `services.postgresql` configuration. Implementations live in their own
-repositories, named for what they wrap; the known ones are listed in the
+repositories, named for what they wrap. The known ones are listed in the
 README.
 
 ## Export and import
@@ -537,13 +537,13 @@ Both need nothing from the service author in the common case, because
 folders, owners and provider claims are already derived per generation.
 Consistency comes from stopping all units of the entry in one
 `systemctl stop`, so timers and sockets cannot re-trigger the service
-mid-copy; snapshots are a follow-up, and the archive records
+mid-copy. Snapshots are a follow-up, and the archive records
 `consistency: "stopped"` to leave room for that.
 
 No store paths travel, because the target can build them, and no secret
 contents, because the archive would otherwise need the same protection as
 the secrets. Settings do travel so a bare target can reproduce the
-service; host-specific paths in them fail the usual existence check on the
+service. Host-specific paths in them fail the usual existence check on the
 target, and `import --settings` replaces the whole set.
 
 Import pins a freshly registered entry to the exported revision so state
@@ -555,7 +555,7 @@ it is ordinary activation, so health probe and rollback apply unchanged.
 
 Backup adapters (`flakelet-borgbackup`, a clan `state` bridge) link
 `flakelet-core` and reuse the same steps with their own storage, schedule
-and retention; they need no contract.
+and retention. They need no contract.
 
 ## Users and state ownership
 
@@ -611,7 +611,7 @@ the next one.
   service.
 - `flakelet check --override-ref` to pin revisions in pull-request CI.
 - A backup adapter on top of the export steps, for clan borgbackup and
-  localbackup; `state.{dump,restore}` in `flakelet-postgres`.
+  localbackup, and `state.{dump,restore}` in `flakelet-postgres`.
 - Firewall and metrics consumers for `exports.ports` / `exports.metrics`.
 - Automatic port allocation: a service asks for one tcp port, flakelet
   assigns it from a range and feeds it back through settings.

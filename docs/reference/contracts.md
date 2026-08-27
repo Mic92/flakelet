@@ -93,7 +93,7 @@ The file name does not matter. Unknown keys are ignored.
 ```
 
 `contract` is the only required key. It tells flakelet that claims under
-`requires.postgres` are handled on this host; `flakelet check` and
+`requires.postgres` are handled on this host. `flakelet check` and
 `flakelet status` warn when a service claims something nobody handles.
 
 The other keys are hooks. flakelet runs each hook as root, once for every

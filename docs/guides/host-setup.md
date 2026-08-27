@@ -161,5 +161,5 @@ $ journalctl -u flakelet-web -u web
 ```
 
 A failed deploy rolls back and puts the service on hold so the timer does
-not retry the same broken inputs; `flakelet status` shows the reason. All
+not retry the same broken inputs. `flakelet status` shows the reason. All
 commands are in the [CLI reference](../reference/cli.md).
