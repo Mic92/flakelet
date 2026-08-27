@@ -1,6 +1,6 @@
 # End-to-end test: a declarative flakelet service is evaluated, built and
 # started at runtime inside the VM, without network access.
-{ flakeletModule }:
+{ flakeletModule, buildArtifact }:
 { pkgs, lib, ... }:
 let
   testService = pkgs.writeTextDir "flake.nix" ''
@@ -38,16 +38,21 @@ let
   # A prebuilt service artifact, as CI would produce it: no runtime evaluation.
   prebuiltArtifact =
     name:
-    pkgs.linkFarm "flakelet-${name}" {
-      "units/${name}.service" = pkgs.writeText "${name}.service" ''
-        [Unit]
-        Description=prebuilt flakelet service ${name}
-        [Service]
-        ExecStart=${pkgs.coreutils}/bin/sleep infinity
-        [Install]
-        WantedBy=multi-user.target
-      '';
-      "meta.json" = pkgs.writeText "meta.json" (builtins.toJSON { flake_url = "prebuilt:${name}"; });
+    buildArtifact pkgs {
+      inherit name;
+      module =
+        { ... }:
+        {
+          impl =
+            { pkgs, name, ... }:
+            {
+              services.${name} = {
+                description = "prebuilt flakelet service ${name}";
+                wantedBy = [ "multi-user.target" ];
+                serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
+              };
+            };
+        };
     };
   cliArtifact = prebuiltArtifact "cli";
 in
