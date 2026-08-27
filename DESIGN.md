@@ -31,9 +31,8 @@ The moving parts are deliberately few:
    types: `{ type, default?, description? }`, unknown keys rejected) and
    validates and renders what `impl` returns: a typed, NixOS-style unit
    interface with `services.<name>.serviceConfig`, `sockets` and `timers`,
-   an automatic name prefix, hard errors on unknown keys and a raw `units`
-   escape hatch, so existing NixOS modules can be ported by copy and paste.
-   Helpers (`contracts`, `storePath`) are injected into `impl`.
+   an automatic name prefix and hard errors on unknown keys, so existing
+   NixOS modules can be ported by copy and paste. Helpers (`contracts`, `storePath`) are injected into `impl`.
 4. The service flakes themselves, in the adios module shape:
    `flakelets.<output> = { types, … }: { options = {…}; impl = {…}: {…}; }`.
    adios' `inputs`/`defaultFunc` wiring is not supported: a flakelet is a
@@ -48,35 +47,31 @@ complete example using adios for typed settings:
 ```nix
 {
   outputs = _: {
-    # `name` is the host-side entry name; deriving pname/units/state dirs from
+    # `name` is the host-side entry name; deriving units and state dirs from
     # it makes the flakelet multi-instance capable.
-    flakelets.default = { pkgs, adios, name, ... }:
-      adios {
-        inherit name;
-        options = {
-          port    = { type = adios.types.int; default = 3000; };
-          tlsCert = { type = adios.types.option adios.types.string; default = null; };
-        };
-        impl = { options, ... }: {
-          units = {
-            "${name}.service" = pkgs.writeText "${name}.service" ''
-              [Service]
-              ExecStart=${pkgs.myservice}/bin/serve --port ${toString options.port}
-              DynamicUser=true
-              StateDirectory=${name}
-              [Install]
-              WantedBy=multi-user.target
-            '';
+    flakelets.default = { types, ... }: {
+      options = {
+        port    = { type = types.number; default = 3000; };
+        tlsCert = { type = types.option types.string; };
+      };
+      impl = { options, pkgs, name, ... }: {
+        services.${name} = {
+          wantedBy = [ "multi-user.target" ];
+          serviceConfig = {
+            ExecStart = "${pkgs.myservice}/bin/serve --port ${toString options.port}";
+            DynamicUser = true;
+            StateDirectory = name;
           };
         };
       };
+    };
   };
 }
 ```
 
-The function is dependency-injected. It receives the host's `pkgs`, which is
-one nixpkgs instance shared between all services of a batch, the `adios`
-library, the entry `name` chosen by the host configuration, the `settings`
+`impl` is dependency-injected. It receives the checked `options`, the
+host's `pkgs`, which is one nixpkgs instance shared between all services of
+a batch, the entry `name` chosen by the host configuration, the `settings`
 from the host, and any helper modules the host wants to hand out through
 `services.flakelets.extraModules`. Because the service derives its unit names
 and state directory from `name`, the same flake can be instantiated several
@@ -91,9 +86,10 @@ journal and in `flakelet status`.
 The value an output attribute holds may be a single flakelet module or an
 attrset of them. Each module returns up to two things:
 
-- `units`: an attrset from unit file name to a derivation containing the unit
-  file. These are plain systemd units that reference store paths directly;
-  the settings are baked into them at evaluation time.
+- `services`, `sockets`, `timers`, `targets`, `paths`: NixOS-style unit
+  definitions that `flakelet.lib` renders into plain systemd unit files
+  referencing store paths directly; the settings are baked into them at
+  evaluation time.
 - `exports` (optional): metadata about what the service provides, described
   in its own section below.
 
@@ -358,7 +354,7 @@ symlinks and a `manifest.json` describing that generation:
   "driver": "/nix/store/…-flakelet-driver.nix",
   "exports": { "metrics": [] },                // derivations replaced by out paths
   "state": { "folders": [ { "path": "/var/lib/grafana", "user": "grafana", "group": "grafana", "dynamic": true } ],
-             "dump": null, "restore": null, "opaque": [] },
+             "dump": null, "restore": null },
   "created": 1767000000
 }
 ```
@@ -774,8 +770,8 @@ No store paths and no secret contents travel. Settings do, but are not
 portable as-is since they carry host paths to secrets and certificates;
 `path_settings` lists those keys and `import --settings` replaces them.
 `export --dry-run` prints `meta.json` or the reasons the service cannot be
-exported: never deployed, degraded, a generation built before `state.json`
-existed, raw `units` without `extraFolders`, or a `requires.*` claim whose
+exported: never deployed, degraded, a generation without `state.json`
+(prebuilt or built by an older flakelet), or a `requires.*` claim whose
 provider has no `state` hooks. `status --json` carries the same list as
 `export_blockers`.
 

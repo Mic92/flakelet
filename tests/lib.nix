@@ -1,11 +1,10 @@
 # Exercises flakelet.lib: option evaluation, unit rendering, name prefixing,
-# the raw units escape hatch, unknown-key errors and the storePath helper.
+# derived state, unknown-key errors and the storePath helper.
 {
   pkgs,
   lib,
   runCommand,
   linkFarm,
-  writeText,
   hello,
   adios,
 }:
@@ -85,7 +84,6 @@ let
       pathConfig.PathChanged = "/var/lib/web";
       wantedBy = [ "paths.target" ];
     };
-    units."web-raw.service" = writeText "web-raw.service" "[Service]\n";
     healthCheck = "/bin/probe";
     exports.ports.http.port = 8080;
   };
@@ -204,7 +202,6 @@ assert
         ];
     dump = "web-dump.service";
     restore = null;
-    opaque = [ "web-raw.service" ];
   };
 assert evaluated.state.folders == [ ];
 assert
@@ -252,7 +249,6 @@ assert
     "web-gc.timer"
     "web-health.service"
     "web-pre.target"
-    "web-raw.service"
     "web-watch.path"
     "web-worker.service"
     "web.service"

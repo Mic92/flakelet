@@ -106,7 +106,6 @@ let
       timers = t.attrsOf (unitType "timer" { timerConfig = configSection; });
       targets = t.attrsOf (unitType "target" { });
       paths = t.attrsOf (unitType "path" { pathConfig = configSection; });
-      units = t.attrsOf t.derivation;
       healthCheck = script;
       dumpScript = script;
       restoreScript = script;
@@ -310,21 +309,19 @@ rec {
         // renderGroup ".socket" (def: section "Socket" (def.socketConfig or { })) (a.sockets or { })
         // renderGroup ".timer" (def: section "Timer" (def.timerConfig or { })) (a.timers or { })
         // renderGroup ".target" (_: "") (a.targets or { })
-        // renderGroup ".path" (def: section "Path" (def.pathConfig or { })) (a.paths or { })
-        # Raw escape hatch: pre-rendered unit files win over typed ones.
-        // (a.units or { });
+        // renderGroup ".path" (def: section "Path" (def.pathConfig or { })) (a.paths or { });
     in
     if units == { } then
       fail "no units defined"
     else
       {
         inherit units;
-        state = deriveState services (a.units or { }) (a.exports.state or { });
+        state = deriveState services (a.exports.state or { });
       }
       // lib.optionalAttrs (a ? exports) { inherit (a) exports; };
 
   deriveState =
-    services: rawUnits: declared:
+    services: declared:
     let
       d = check ((t.struct "exports.state" { extraFolders = t.listOf t.string; }).override {
         total = false;
@@ -384,8 +381,6 @@ rec {
         folders = lib.attrValues (lib.listToAttrs (map (f: lib.nameValuePair f.path f) folders));
         dump = if services ? dump then "${name}-dump.service" else null;
         restore = if services ? restore then "${name}-restore.service" else null;
-        # Raw units would need IFD to inspect. Core checks them at export time.
-        opaque = lib.filter (lib.hasSuffix ".service") (lib.attrNames rawUnits);
       };
 
   # Blessed contract constructors; the JSON shape is the interface
