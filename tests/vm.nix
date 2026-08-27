@@ -27,6 +27,11 @@ let
                   environment.GREETING = options.greeting;
                   serviceConfig.ExecStart = "''${pkgs.coreutils}/bin/sleep infinity";
                 };
+                # On-demand oneshot (no [Install]), like a timer's job.
+                services.job.serviceConfig = {
+                  Type = "oneshot";
+                  ExecStart = "''${pkgs.bash}/bin/sh -c 'test ! -e /tmp/failjob'";
+                };
                 exports = {
                   metrics = [ { port = 9100; } ];
                   ports.web.port = options.port;
@@ -51,6 +56,16 @@ let
       "meta.json" = pkgs.writeText "meta.json" (builtins.toJSON { flake_url = "prebuilt:${name}"; });
     };
   cliArtifact = prebuiltArtifact "cli";
+  cliArtifact2 = (prebuiltArtifact "cli").overrideAttrs { name = "flakelet-cli2"; };
+  brokenArtifact = pkgs.linkFarm "flakelet-cli-broken" {
+    "units/cli.service" = pkgs.writeText "cli.service" ''
+      [Service]
+      Type=exec
+      ExecStart=/nonexistent
+      [Install]
+      WantedBy=multi-user.target
+    '';
+  };
 in
 {
   name = "flakelet";
@@ -83,6 +98,8 @@ in
 
       virtualisation = {
         writableStore = true;
+        # Runtime-built generations must survive the reboot below.
+        writableStoreUseTmpfs = false;
         additionalPaths = [
           config.services.flakelets.nixpkgs
           testService
@@ -92,6 +109,8 @@ in
           pkgs.bash
           pkgs.coreutils
           cliArtifact
+          cliArtifact2
+          brokenArtifact
         ];
         memorySize = 4096;
         cores = 4;
@@ -127,6 +146,25 @@ in
     machine.succeed("systemctl is-active cli.service")
     machine.succeed("flakelet status --json | grep -q 'prebuilt:cli'")
 
+    # A broken artifact is rolled back, leaves no generation behind and is
+    # held instead of retried.
+    machine.fail("flakelet activate cli ${brokenArtifact}")
+    machine.succeed("systemctl is-active cli.service")
+    machine.succeed("test \"$(ls /nix/var/nix/gcroots/flakelet/cli)\" = gen-1")
+    assert "held" in machine.fail("flakelet activate cli ${brokenArtifact}")
+    machine.succeed("flakelet activate cli ${cliArtifact2} | grep -q 'generation 2'")
+    machine.succeed("flakelet rollback cli | grep -q 'generation 1'")
+    machine.succeed("systemctl is-active cli.service")
+    # lock pins what is deployed, not what upstream resolves to.
+    machine.succeed("flakelet lock cli | grep -q 'prebuilt:cli'")
+    machine.succeed("flakelet unlock cli")
+
+    # A stale failure of an on-demand unit must not fail the next deploy.
+    machine.succeed("touch /tmp/failjob")
+    machine.fail("systemctl start web-job.service")
+    machine.succeed("systemctl is-failed web-job.service && rm /tmp/failjob")
+    machine.succeed("flakelet update web --force --no-refresh | grep -q 'updated to generation'", timeout=600)
+
     # Reconcile keeps still-declared and imperative services.
     machine.succeed("flakelet reconcile")
     machine.succeed("systemctl is-active web.service static.service cli.service")
@@ -143,5 +181,11 @@ in
     machine.succeed("rm /run/systemd/system/web.service")
     machine.succeed("flakelet boot")
     machine.succeed("test -L /run/systemd/system/web.service")
+
+    # After a reboot the services come up from the boot relink alone.
+    machine.shutdown()
+    machine.start()
+    machine.wait_for_unit("web.service")
+    machine.wait_for_unit("cli.service")
   '';
 }

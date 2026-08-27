@@ -18,10 +18,8 @@ pub struct Manifest {
     pub settings_hash: String,
     /// Store path of the driver expression that produced this generation.
     pub driver: PathBuf,
-    /// Store path of the built service artifact (`flakelet diff` compares
-    /// its closure against a fresh evaluation). Absent in old manifests.
-    #[serde(default)]
-    pub artifact: Option<PathBuf>,
+    /// Store path of the built service artifact.
+    pub artifact: PathBuf,
     /// Exports of this generation (derivations already replaced by out paths).
     #[serde(default)]
     pub exports: serde_json::Value,
@@ -90,6 +88,11 @@ impl Generations {
         Ok(next)
     }
 
+    /// Drop a generation that never became active.
+    pub fn remove(&self, gen: u32) -> Result<()> {
+        fs::remove_dir_all(self.dir.join(format!("gen-{gen}"))).map_err(self.io())
+    }
+
     /// Remove generations older than the newest `keep`, but never the currently active one.
     pub fn prune(&self, keep: u32, current: Option<u32>) -> Result<Vec<u32>> {
         let gens = self.list()?;
@@ -127,7 +130,7 @@ mod tests {
             flake_rev: "abc".into(),
             settings_hash: "h".into(),
             driver: "/nix/store/drv-driver.nix".into(),
-            artifact: None,
+            artifact: "/nix/store/artifact".into(),
             exports: serde_json::Value::Null,
             state: None,
             created: 0,

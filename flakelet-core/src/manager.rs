@@ -124,19 +124,37 @@ pub type Failures = Vec<(String, Error)>;
 
 pub struct Manager {
     pub config: Config,
-    system: String,
+    /// Whether <state_dir> belongs to this config. False when checking
+    /// another machine's rendered config.
+    local: bool,
 }
 
 impl Manager {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            system: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+            local: true,
+        }
+    }
+
+    /// For `check`/`build`/`driver` against a rendered config of another machine.
+    pub fn off_machine(config: Config) -> Self {
+        Self {
+            config,
+            local: false,
         }
     }
 
     pub fn load(config_path: &Path) -> Result<Self> {
         Ok(Self::new(Config::load(config_path)?))
+    }
+
+    /// The active generation's manifest. Units, exports, state folders and
+    /// flake URL are only ever read from here.
+    pub fn current(&self, name: &str, st: &State) -> Result<Option<Manifest>> {
+        st.generation
+            .map(|g| Generations::new(&self.config.gcroot_dir, name).manifest(g))
+            .transpose()
     }
 
     fn service_dir(&self, name: &str) -> PathBuf {
@@ -206,6 +224,9 @@ impl Manager {
     fn state_dirs(&self) -> Result<Vec<String>> {
         let io = || Error::io(format!("read {}", self.config.state_dir.display()));
         let mut names = Vec::new();
+        if !self.local {
+            return Ok(names);
+        }
         match fs::read_dir(&self.config.state_dir) {
             Ok(entries) => {
                 for entry in entries {
@@ -265,45 +286,49 @@ impl Manager {
             };
             let updating =
                 lock::acquire(&self.service_lock(&name), true, false, "status probe").is_err();
-            let export_blockers = self.export_blockers(&st, false);
-            let failed_units = systemd::failed(&st.units).unwrap_or_default();
-            result.push(ServiceStatus {
-                name,
+            let mut status = ServiceStatus {
                 flake: svc.flake,
                 origin,
                 generation: st.generation,
-                units: st.units,
-                locked_url: st.locked_url,
-                pin: st.pin,
-                override_flake: st.override_flake,
+                pin: st.pin.clone(),
+                override_flake: st.override_flake.clone(),
                 degraded: st.degraded,
-                held: st.hold.map(|h| h.reason),
-                last_error: st.last_error,
+                held: st.hold.as_ref().map(|h| h.reason.clone()),
+                last_error: st.last_error.clone(),
                 updating,
-                failed_units,
-                missing_providers: exports::unannounced_claims(
-                    &st.exports,
-                    &self.config.providers_dir,
-                ),
-                export_blockers,
-                state: st.state,
-            });
+                ..ServiceStatus::named(name.clone())
+            };
+            match self.current(&name, &st) {
+                Ok(cur) => {
+                    status.export_blockers = self.export_blockers(&st, cur.as_ref(), false);
+                    if let Some(m) = cur {
+                        status.failed_units = systemd::failed(&m.units).unwrap_or_default();
+                        status.missing_providers =
+                            exports::unannounced_claims(&m.exports, &self.config.providers_dir);
+                        status.units = m.units;
+                        status.locked_url = Some(m.flake_url);
+                        status.state = m.state;
+                    }
+                }
+                Err(e) => status.last_error = Some(e.to_string()),
+            }
+            result.push(status);
         }
         Ok(result)
     }
 
-    fn current_artifact(&self, name: &str, st: &State) -> Option<PathBuf> {
-        let gens = Generations::new(&self.config.gcroot_dir, name);
-        gens.manifest(st.generation?).ok()?.artifact
-    }
-
-    fn export_blockers(&self, st: &State, need_restore: bool) -> Vec<String> {
-        if st.generation.is_none() {
+    fn export_blockers(
+        &self,
+        st: &State,
+        current: Option<&Manifest>,
+        need_restore: bool,
+    ) -> Vec<String> {
+        let Some(m) = current else {
             return vec!["never deployed".into()];
-        }
+        };
         let mut b = svcstate::blockers(
-            st.state.as_ref(),
-            &st.exports,
+            m.state.as_ref(),
+            &m.exports,
             &self.config.providers_dir,
             need_restore,
         );
@@ -350,7 +375,7 @@ impl Manager {
                 nixpkgs_override: nixpkgs.as_ref().map(|n| n.url.as_str()),
             })
             .collect();
-        Ok(driver::render(&self.config, &self.system, &entries))
+        Ok(driver::render(&self.config, &entries))
     }
 
     /// Off-machine evaluation (and optionally build) of the configured
@@ -408,13 +433,10 @@ impl Manager {
     pub fn diff(&self, name: &str, refresh: bool) -> Result<String> {
         let (svc, _) = self.service(name)?;
         let st = State::load(&self.state_path(name))?;
-        let current = st
-            .generation
-            .ok_or_else(|| Error::NeverDeployed(name.into()))?;
-        let manifest = Generations::new(&self.config.gcroot_dir, name).manifest(current)?;
-        let old = manifest
-            .artifact
-            .ok_or_else(|| Error::NoArtifactRecorded(name.into()))?;
+        let old = self
+            .current(name, &st)?
+            .ok_or_else(|| Error::NeverDeployed(name.into()))?
+            .artifact;
         let new = match &svc.prebuilt {
             Some(prebuilt) => prebuilt.clone(),
             None => {
@@ -469,13 +491,20 @@ impl Manager {
         }
         let _locks = self.locks(name, true, "remove")?;
         let st = State::load(&self.state_path(name))?;
-        systemd::remove(&st.units)?;
+        let current = self.current(name, &st)?;
+        if let Some(m) = &current {
+            systemd::remove(&m.units)?;
+        }
         exports::unpublish(&self.config.runtime_dir, name)?;
         Generations::new(&self.config.gcroot_dir, name).remove_all()?;
         fs::remove_dir_all(self.service_dir(name))
             .map_err(Error::io(format!("remove state of {name}")))?;
         let mut left = Vec::new();
-        for f in st.state.iter().flat_map(|s| &s.folders) {
+        for f in current
+            .iter()
+            .flat_map(|m| &m.state)
+            .flat_map(|s| &s.folders)
+        {
             let real = transfer::real_path(f);
             if purge {
                 let _ = fs::remove_dir_all(&real);
@@ -513,11 +542,11 @@ impl Manager {
         for name in self.state_dirs()? {
             let relink = |name: &str| -> Result<bool> {
                 let st = State::load(&self.state_path(name))?;
-                if st.units.is_empty() {
+                let Some(m) = self.current(name, &st)? else {
                     return Ok(false);
-                }
-                systemd::relink(&st.units)?;
-                exports::publish(&self.config.runtime_dir, name, &st.exports)?;
+                };
+                exports::publish(&self.config.runtime_dir, name, &m.exports)?;
+                systemd::start(&m.units, false)?;
                 Ok(true)
             };
             match relink(&name) {
@@ -529,14 +558,18 @@ impl Manager {
         Ok((linked, failed))
     }
 
+    /// Pin to the revision of the active generation.
     pub fn lock_service(&self, name: &str) -> Result<String> {
-        let (svc, _) = self.service(name)?;
+        self.service(name)?;
         let _locks = self.locks(name, true, "lock")?;
         let mut st = State::load(&self.state_path(name))?;
-        let locked = self.nix(&svc).locked_url(&svc.flake, true)?;
-        st.pin = Some(locked.url.clone());
+        let url = self
+            .current(name, &st)?
+            .ok_or_else(|| Error::NeverDeployed(name.into()))?
+            .flake_url;
+        st.pin = Some(url.clone());
         st.save(&self.state_path(name))?;
-        Ok(locked.url)
+        Ok(url)
     }
 
     pub fn unlock_service(&self, name: &str) -> Result<()> {
@@ -580,30 +613,31 @@ impl Manager {
         let _locks = self.locks(name, true, "rollback")?;
         let mut st = State::load(&self.state_path(name))?;
         let gens = Generations::new(&self.config.gcroot_dir, name);
-        let current = st
-            .generation
+        let current = self
+            .current(name, &st)?
             .ok_or_else(|| Error::NeverDeployed(name.into()))?;
         let target = *gens
             .list()?
             .iter()
-            .rfind(|&&g| g < current)
+            .rfind(|&&g| Some(g) < st.generation)
             .ok_or_else(|| Error::NoOlderGeneration(name.into()))?;
         let manifest = gens.manifest(target)?;
-        systemd::switch(&st.units, &manifest.units)?;
         exports::publish(&self.config.runtime_dir, name, &manifest.exports)?;
+        if let Err(e) = systemd::switch(&current.units, &manifest.units) {
+            exports::publish(&self.config.runtime_dir, name, &current.exports)?;
+            return Err(e);
+        }
         st.generation = Some(target);
-        st.units = manifest.units;
-        st.exports = manifest.exports;
-        st.state = manifest.state;
         st.save(&self.state_path(name))?;
         Ok(target)
     }
 
     /// Describe what `export` would write. Also the exportability check.
-    pub fn export_meta(&self, name: &str) -> Result<(ExportMeta, ServiceConfig, State)> {
+    pub fn export_meta(&self, name: &str) -> Result<(ExportMeta, ServiceConfig, Units)> {
         let (svc, _) = self.service(name)?;
         let st = State::load(&self.state_path(name))?;
-        let reasons = self.export_blockers(&st, false);
+        let current = self.current(name, &st)?;
+        let reasons = self.export_blockers(&st, current.as_ref(), false);
         if !reasons.is_empty() {
             return Err(Error::NotTransferable {
                 service: name.into(),
@@ -611,8 +645,7 @@ impl Manager {
                 reasons,
             });
         }
-        let manifest = Generations::new(&self.config.gcroot_dir, name)
-            .manifest(st.generation.expect("blockers checked deployment"))?;
+        let manifest = current.expect("blockers checked deployment");
         let meta = ExportMeta {
             version: transfer::FORMAT_VERSION,
             flakelet_version: env!("CARGO_PKG_VERSION").into(),
@@ -627,13 +660,13 @@ impl Manager {
             consistency: "stopped".into(),
             path_settings: transfer::path_settings(&svc.settings),
         };
-        Ok((meta, svc, st))
+        Ok((meta, svc, manifest.units))
     }
 
     /// Stop the service, collect its state into `out`, start it again.
     pub fn export(&self, name: &str, out: &Path) -> Result<ExportMeta> {
         let _locks = self.locks(name, true, "export")?;
-        let (meta, svc, st) = self.export_meta(name)?;
+        let (meta, svc, units) = self.export_meta(name)?;
         fs::create_dir_all(&self.config.cache_dir).map_err(Error::io("create cache dir"))?;
         let work =
             tempfile::tempdir_in(&self.config.cache_dir).map_err(Error::io("create export dir"))?;
@@ -645,7 +678,7 @@ impl Manager {
         }
 
         eprintln!("{name}: stopping units");
-        systemd::stop_all(&st.units)?;
+        systemd::stop(&units)?;
         let collected = (|| {
             if let Some(unit) = &meta.state.dump {
                 eprintln!("{name}: running {unit}");
@@ -664,7 +697,7 @@ impl Manager {
             Ok(())
         })();
         eprintln!("{name}: starting units");
-        let restarted = systemd::start_all(&st.units);
+        let restarted = systemd::start(&units, true);
         collected?;
         restarted?;
         transfer::pack(dir, out)?;
@@ -745,9 +778,8 @@ impl Manager {
 
     /// Between build and activation of an import: put the archived state in
     /// place so the units start on top of it.
-    fn restore(&self, name: &str, artifact: &Artifact, dir: &Path) -> Result<()> {
+    fn restore(&self, name: &str, previous: &Units, artifact: &Artifact, dir: &Path) -> Result<()> {
         let meta = ExportMeta::load(dir)?;
-        let st = State::load(&self.state_path(name))?;
         let Some(target) = &artifact.state else {
             return Err(Error::NotTransferable {
                 service: name.into(),
@@ -755,8 +787,16 @@ impl Manager {
                 reasons: vec!["evaluation produced no state.json".into()],
             });
         };
+        // state/<i>.tar is positional, so the evaluated folders must equal
+        // the archived ones modulo the entry name.
         let mut reasons = Vec::new();
-        if target.folders.len() != meta.state.folders.len()
+        let renamed: Vec<PathBuf> = meta
+            .state
+            .folders
+            .iter()
+            .map(|f| transfer::rename_folder(&f.path, &meta.name, name))
+            .collect();
+        if target.paths() != renamed.iter().map(PathBuf::as_path).collect::<Vec<_>>()
             || target.dump.is_some() != meta.state.dump.is_some()
             || target.restore.is_some() != meta.state.restore.is_some()
         {
@@ -778,7 +818,7 @@ impl Manager {
         }
         self.import_precheck(name, target, &artifact.exports)?;
 
-        systemd::stop_all(&st.units)?;
+        systemd::remove(previous)?;
         let run = || -> Result<()> {
             for (i, folder) in target.folders.iter().enumerate() {
                 eprintln!("{name}: restoring {}", folder.path.display());
@@ -787,7 +827,7 @@ impl Manager {
             transfer::provider_hooks(&artifact.exports, &self.config.providers_dir, dir, true)?;
             if let Some(unit) = &target.restore {
                 eprintln!("{name}: running {unit}");
-                systemd::relink(&artifact.units)?;
+                systemd::load(&artifact.units)?;
                 if !systemd::start_oneshot(unit)? {
                     return Err(Error::OneshotFailed {
                         service: name.into(),
@@ -803,10 +843,7 @@ impl Manager {
             for folder in &target.folders {
                 transfer::clear_dir(&transfer::real_path(folder));
             }
-            let _ = systemd::remove(&artifact.units);
-            if !st.units.is_empty() {
-                let _ = systemd::relink(&st.units);
-            }
+            let _ = systemd::switch(&artifact.units, previous);
         }
         result
     }
@@ -896,33 +933,33 @@ impl Manager {
             }
             eprintln!("{name}: resolving {flake_ref}");
             let locked = nix.locked_url(&flake_ref, !opts.no_refresh)?;
-
-            if !opts.force && st.held_for(&settings_hash, &locked.rev) {
-                return Ok(UpdateOutcome::Held {
-                    reason: st
-                        .hold
-                        .as_ref()
-                        .map(|h| h.reason.clone())
-                        .unwrap_or_default(),
-                });
-            }
             let nixpkgs = resolve_overrides(name, svc, &nix, !opts.no_refresh)?;
             self.evaluate(name, svc, &nix, &locked, nixpkgs.as_ref(), &settings_hash)?
         };
 
+        if !opts.force {
+            if let Some(hold) = st.held_for(&artifact.out) {
+                return Ok(UpdateOutcome::Held {
+                    reason: hold.reason.clone(),
+                });
+            }
+        }
         read_contents(name, &mut artifact)?;
         self.check_conflicts(name, &artifact)?;
 
+        let current = self.current(name, st)?;
         if let Some(dir) = &opts.restore_from {
-            self.restore(name, &artifact, dir)?;
-            // restore() stopped the units. Make switch() start them again.
-            st.units.clear();
-        } else if !opts.force && self.current_artifact(name, st).as_ref() == Some(&artifact.out) {
+            let previous = current
+                .as_ref()
+                .map(|m| m.units.clone())
+                .unwrap_or_default();
+            self.restore(name, &previous, &artifact, dir)?;
+        } else if !opts.force && current.as_ref().is_some_and(|m| m.artifact == artifact.out) {
             st.degraded = false;
             st.last_error = None;
             return Ok(UpdateOutcome::UpToDate);
         }
-        self.activate(name, svc, st, artifact, soft_refs)
+        self.activate(name, svc, st, current.as_ref(), artifact, soft_refs)
     }
 
     /// Render, store, evaluate and build the driver expression for one service.
@@ -937,7 +974,6 @@ impl Manager {
     ) -> Result<Artifact> {
         let expr = driver::render(
             &self.config,
-            &self.system,
             &[DriverEntry {
                 name,
                 locked_url: &locked.url,
@@ -974,12 +1010,13 @@ impl Manager {
     }
 
     /// Commit the artifact as a new generation and switch the units over,
-    /// rolling back to the previous generation if activation fails.
+    /// rolling back to `previous` if activation fails.
     fn activate(
         &self,
         name: &str,
         svc: &ServiceConfig,
         st: &mut State,
+        previous: Option<&Manifest>,
         artifact: Artifact,
         soft_refs: Vec<String>,
     ) -> Result<UpdateOutcome> {
@@ -997,7 +1034,7 @@ impl Manager {
             flake_rev: artifact.flake_rev.clone(),
             settings_hash: artifact.settings_hash.clone(),
             driver: artifact.driver,
-            artifact: Some(artifact.out.clone()),
+            artifact: artifact.out.clone(),
             exports: artifact.exports.clone(),
             state: artifact.state.clone(),
             created: unix_time(),
@@ -1005,33 +1042,34 @@ impl Manager {
         let generation = gens.create(&manifest, &extra_roots)?;
 
         eprintln!("{name}: activating generation {generation}");
-        let previous_units = st.units.clone();
+        let previous_units = previous.map(|m| m.units.clone()).unwrap_or_default();
+        // Publish first so a provider can provision what the units'
+        // readiness probe needs.
+        exports::publish(&self.config.runtime_dir, name, &artifact.exports)?;
         let result =
             systemd::switch(&previous_units, &units).and_then(|()| health_check_run(name, &units));
 
         if let Err(err) = result {
             let reason = err.to_string();
-            // Restore the previous units. On a first deploy this stops
-            // and unlinks the failed units.
+            // A generation that never ran is not a rollback target.
+            gens.remove(generation)?;
+            match previous {
+                Some(m) => exports::publish(&self.config.runtime_dir, name, &m.exports)?,
+                None => exports::unpublish(&self.config.runtime_dir, name)?,
+            }
             systemd::switch(&units, &previous_units).map_err(|e| Error::RollbackFailed {
                 service: name.into(),
                 source: Box::new(e),
             })?;
             st.hold = Some(Hold {
                 reason: reason.clone(),
-                settings_hash: artifact.settings_hash,
-                flake_rev: artifact.flake_rev,
+                artifact: artifact.out,
             });
             st.last_error = Some(reason.clone());
             return Ok(UpdateOutcome::RolledBack { reason });
         }
 
-        exports::publish(&self.config.runtime_dir, name, &artifact.exports)?;
         st.generation = Some(generation);
-        st.units = units;
-        st.exports = artifact.exports;
-        st.state = artifact.state;
-        st.locked_url = Some(artifact.flake_url);
         st.hold = None;
         st.degraded = false;
         st.last_error = None;
@@ -1047,14 +1085,17 @@ impl Manager {
                 continue;
             }
             let st = State::load(&self.state_path(&other))?;
-            if let Some(unit) = artifact.units.keys().find(|u| st.units.contains_key(*u)) {
+            let Some(m) = self.current(&other, &st)? else {
+                continue;
+            };
+            if let Some(unit) = artifact.units.keys().find(|u| m.units.contains_key(*u)) {
                 return Err(Error::UnitConflict {
                     service: name.into(),
                     unit: unit.clone(),
                     owner: other,
                 });
             }
-            exports::check_port_conflicts(name, &artifact.exports, &other, &st.exports)?;
+            exports::check_port_conflicts(name, &artifact.exports, &other, &m.exports)?;
         }
         Ok(())
     }
@@ -1129,7 +1170,7 @@ fn validate_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     let ok = name.len() <= 128
         && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        // No '.': the name is a driver attribute and nix-eval-jobs quotes dots.
+        // No dots. The name is a driver attribute and nix-eval-jobs quotes dotted ones.
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
     if ok {
         Ok(())
@@ -1398,9 +1439,25 @@ mod tests {
     fn foreign_unit_names_and_ports_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let mgr = manager(tmp.path());
+        let gen = Generations::new(&mgr.config.gcroot_dir, "other")
+            .create(
+                &Manifest {
+                    version: 1,
+                    units: Units::from([("web.service".into(), "/nix/store/x".into())]),
+                    flake_url: String::new(),
+                    flake_rev: String::new(),
+                    settings_hash: String::new(),
+                    driver: "/nix/store/d".into(),
+                    artifact: "/nix/store/a".into(),
+                    exports: serde_json::json!({ "ports": { "http": { "port": 80 } } }),
+                    state: None,
+                    created: 0,
+                },
+                &[],
+            )
+            .unwrap();
         State {
-            units: Units::from([("web.service".into(), "/nix/store/x".into())]),
-            exports: serde_json::json!({ "ports": { "http": { "port": 80 } } }),
+            generation: Some(gen),
             ..Default::default()
         }
         .save(&mgr.state_path("other"))

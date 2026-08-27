@@ -8,7 +8,7 @@
 let
   cfg = config.services.flakelets;
   flakelet = lib.getExe cfg.package;
-  updateService = name: flags: {
+  updateService = args: {
     wants = [ "network-online.target" ];
     after = [
       "network-online.target"
@@ -19,7 +19,14 @@ let
       Nice = 10;
       IOSchedulingClass = "idle";
       MemoryHigh = "75%";
-      ExecStart = "${flakelet} update --offline-fallback ${flags}${name}";
+      ExecStart = lib.escapeShellArgs (
+        [
+          flakelet
+          "update"
+          "--offline-fallback"
+        ]
+        ++ args
+      );
     };
   };
 in
@@ -55,6 +62,7 @@ in
         before = [ "flakelet.target" ];
         serviceConfig = {
           Type = "oneshot";
+          RemainAfterExit = true;
           ExecStart = "${flakelet} boot";
         };
       };
@@ -74,11 +82,11 @@ in
         };
       };
     }
-    # Runs once per definition change (RemainAfterExit + restartTriggers) ...
+    # Runs once per definition change.
     // lib.mapAttrs' (
       name: svc:
       lib.nameValuePair "flakelet-${name}" (
-        lib.recursiveUpdate (updateService name "") {
+        lib.recursiveUpdate (updateService [ name ]) {
           description = "Update flakelet service ${name}";
           wantedBy = [ "multi-user.target" ];
           before = [ "flakelet.target" ];
@@ -87,12 +95,18 @@ in
         }
       )
     ) cfg.services
-    # ... while the timer needs a unit that goes inactive after each run.
+    # The timer needs a unit that goes inactive after each run.
     // lib.mapAttrs' (
       name: _:
       lib.nameValuePair "flakelet-${name}-auto" (
         # Timer ticks must not queue up behind a running update.
-        updateService name "--no-wait " // { description = "Scheduled update of flakelet service ${name}"; }
+        updateService [
+          "--no-wait"
+          name
+        ]
+        // {
+          description = "Scheduled update of flakelet service ${name}";
+        }
       )
     ) (lib.filterAttrs (_: svc: svc.autoUpdate.enable) cfg.services);
 

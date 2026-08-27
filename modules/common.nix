@@ -143,6 +143,7 @@ in
   config = lib.mkIf cfg.enable {
     services.flakelets.configFile = json.generate "flakelet-config.json" {
       version = 1;
+      system = pkgs.stdenv.hostPlatform.system;
       eval_user = "flakelet";
       nixpkgs = "${cfg.nixpkgs}";
       adios = "${cfg.adios}";

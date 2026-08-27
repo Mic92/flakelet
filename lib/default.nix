@@ -403,7 +403,7 @@ rec {
       fail "exports.state.extraFolders needs a static User= on services.${name}"
     else
       {
-        # First claim per path wins, order kept: the archive is positional.
+        # First claim per path wins and order is kept. The archive is positional.
         folders = lib.foldl' (
           acc: f: if lib.any (g: g.path == f.path) acc then acc else acc ++ [ f ]
         ) [ ] folders;

@@ -38,7 +38,7 @@ Commands:
                         Stop the service and archive its state for another machine
   import <file>|- [--name <name>] [--settings <file>] [update options]
                         Restore an exported service and start it
-  lock <name>           Pin a service to the currently resolved flake revision
+  lock <name>           Pin a service to the currently deployed flake revision
   unlock <name>         Remove the pin
   gc [--keep <n>]       Prune old generations
 
@@ -207,7 +207,7 @@ Example:
         "lock" => "\
 Usage: flakelet lock <name>
 
-Pin a service to the currently resolved flake revision. Updates keep
+Pin a service to the revision of its active generation. Updates keep
 deploying the pinned revision until 'flakelet unlock'.
 
 Example:
@@ -500,22 +500,31 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
 }
 
 fn run(cli: &Cli) -> Result<bool> {
-    let config = match &cli.config {
+    let mgr = match &cli.config {
         ConfigSource::File(path) => {
             if cli.config_explicit && !path.exists() {
                 return Err(Error::io(format!("cannot read config {}", path.display()))(
                     std::io::ErrorKind::NotFound.into(),
                 ));
             }
-            path.clone()
+            let config = flakelet_core::Config::load(path)?;
+            // `check --config <rendered>` is the CI entry point. That config
+            // describes another machine whose state dir is not ours.
+            if cli.config_explicit && matches!(cli.command, Cmd::Check { .. } | Cmd::Driver { .. })
+            {
+                Manager::off_machine(config)
+            } else {
+                Manager::new(config)
+            }
         }
         // Off-machine: build the machine's rendered config.json from its flake.
-        ConfigSource::Machine { flake, name } => Nix::new(&flakelet_core::Config::default(), None)
-            .build_attr(&format!(
+        ConfigSource::Machine { flake, name } => {
+            let path = Nix::new(&flakelet_core::Config::default(), None).build_attr(&format!(
                 "{flake}#nixosConfigurations.{name}.config.services.flakelets.configFile"
-            ))?,
+            ))?;
+            Manager::off_machine(flakelet_core::Config::load(&path)?)
+        }
     };
-    let mgr = Manager::load(&config)?;
     match &cli.command {
         Cmd::Update { names, opts } => {
             let names = if names.is_empty() {

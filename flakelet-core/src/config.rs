@@ -13,6 +13,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[serde(default)]
 pub struct Config {
     pub version: u32,
+    /// Nix system of the target machine. Defaults to this binary's platform.
+    pub system: String,
     pub eval_user: Option<String>,
     pub cache_dir: PathBuf,
     pub state_dir: PathBuf,
@@ -39,6 +41,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: SCHEMA_VERSION,
+            system: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
             eval_user: None,
             cache_dir: "/var/cache/flakelet".into(),
             state_dir: "/var/lib/flakelet".into(),

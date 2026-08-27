@@ -19,7 +19,8 @@ pub struct DriverEntry<'a> {
 /// Render the driver expression that is added to the store and evaluated with
 /// nix-eval-jobs. Each attribute builds a self-describing artifact:
 /// meta.json, state.json, units/<unit files> and optional exports.json.
-pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String {
+pub fn render(config: &Config, entries: &[DriverEntry]) -> String {
+    let system = config.system.as_str();
     let nixpkgs = config
         .nixpkgs
         .as_ref()
@@ -161,12 +162,12 @@ mod tests {
             nixpkgs: Some("/nix/store/aaa-source".into()),
             adios: Some("/nix/store/bbb-adios".into()),
             flakelet_lib: Some("/nix/store/ccc-flakelet-lib".into()),
+            system: "x86_64-linux".into(),
             ..Config::default()
         };
         let settings = json!({ "port": 3000 });
         let expr = render(
             &config,
-            "x86_64-linux",
             &[DriverEntry {
                 name: "grafana",
                 locked_url: "github:me/grafana-svc/abc?narHash=sha256-xyz",
@@ -199,12 +200,12 @@ mod tests {
             nixpkgs: Some("/nix/store/aaa-source".into()),
             adios: Some("/nix/store/bbb-adios".into()),
             flakelet_lib: Some("/nix/store/ccc-flakelet-lib".into()),
+            system: "x86_64-linux".into(),
             ..Config::default()
         };
         let settings = json!({});
         let expr = render(
             &config,
-            "x86_64-linux",
             &[DriverEntry {
                 name: "svc",
                 locked_url: "github:me/svc/abc?narHash=sha256-xyz",

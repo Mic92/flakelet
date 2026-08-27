@@ -1,11 +1,9 @@
 use crate::config::SCHEMA_VERSION;
 use crate::error::{Error, Result};
-use crate::systemd::Units;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Where a service definition came from. Declarative services are removed by
 /// `reconcile` when they disappear from the host configuration.
@@ -17,7 +15,9 @@ pub enum Origin {
     Manual,
 }
 
-/// Per-service state, stored at <state_dir>/<name>/state.json.
+/// Per-service state, stored at <state_dir>/<name>/state.json. Everything
+/// about the active generation lives in its manifest, so a switch changes
+/// one field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
@@ -25,18 +25,11 @@ pub struct State {
     pub origin: Origin,
     /// Currently active generation number.
     pub generation: Option<u32>,
-    /// Currently linked units: name -> unit file store path.
-    pub units: Units,
-    /// Exports of the active generation (also published under runtime_dir).
-    pub exports: Value,
-    pub state: Option<crate::svcstate::StateInfo>,
-    /// Locked flake URL of the last successful update.
-    pub locked_url: Option<String>,
     /// Pinned flake URL set by `flakelet lock`.
     pub pin: Option<String>,
     /// Testing ref from `update --flake`. Cleared by the next regular update.
     pub override_flake: Option<String>,
-    /// Set after a failed deploy; cleared when settings/rev change or --force.
+    /// Set after a failed activation. The same artifact is not tried again.
     pub hold: Option<Hold>,
     /// Running an older cached generation because the last eval failed offline.
     pub degraded: bool,
@@ -49,10 +42,6 @@ impl Default for State {
             version: SCHEMA_VERSION,
             origin: Origin::default(),
             generation: None,
-            units: Units::new(),
-            exports: Value::Null,
-            state: None,
-            locked_url: None,
             pin: None,
             override_flake: None,
             hold: None,
@@ -65,8 +54,7 @@ impl Default for State {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Hold {
     pub reason: String,
-    pub settings_hash: String,
-    pub flake_rev: String,
+    pub artifact: PathBuf,
 }
 
 impl State {
@@ -87,11 +75,8 @@ impl State {
         write_json_atomic(path, self)
     }
 
-    /// Whether an update with these inputs should be skipped due to a hold.
-    pub fn held_for(&self, settings_hash: &str, flake_rev: &str) -> bool {
-        self.hold
-            .as_ref()
-            .is_some_and(|h| h.settings_hash == settings_hash && h.flake_rev == flake_rev)
+    pub fn held_for(&self, artifact: &Path) -> Option<&Hold> {
+        self.hold.as_ref().filter(|h| h.artifact == artifact)
     }
 }
 
@@ -125,11 +110,9 @@ mod tests {
         let st = State {
             origin: Origin::Manual,
             generation: Some(3),
-            units: Units::from([("grafana.service".into(), "/nix/store/x".into())]),
             hold: Some(Hold {
                 reason: "health check failed".into(),
-                settings_hash: "abc".into(),
-                flake_rev: "deadbeef".into(),
+                artifact: "/nix/store/a".into(),
             }),
             ..State::default()
         };
@@ -137,8 +120,7 @@ mod tests {
 
         let loaded = State::load(&path).unwrap();
         assert_eq!(loaded.origin, Origin::Manual);
-        assert_eq!(loaded.units.len(), 1);
-        assert!(loaded.held_for("abc", "deadbeef"));
-        assert!(!loaded.held_for("abc", "newrev"));
+        assert!(loaded.held_for(Path::new("/nix/store/a")).is_some());
+        assert!(loaded.held_for(Path::new("/nix/store/b")).is_none());
     }
 }
