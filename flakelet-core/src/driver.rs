@@ -113,6 +113,8 @@ pub fn json_to_nix(value: &Value) -> String {
     match value {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
+        // A leading minus is an operator in Nix, not part of the literal.
+        Value::Number(n) if n.to_string().starts_with('-') => format!("({n})"),
         Value::Number(n) => n.to_string(),
         Value::String(s) => nix_string(s),
         Value::Array(items) => {
@@ -145,10 +147,11 @@ mod tests {
 
     #[test]
     fn json_to_nix_conversion() {
-        let v = json!({ "port": 3000, "tls": null, "flags": ["-v", true], "name": "a\"${x}\"" });
+        let v =
+            json!({ "port": 3000, "tls": null, "flags": ["-v", true, -1], "name": "a\"${x}\"" });
         assert_eq!(
             json_to_nix(&v),
-            r#"{ "flags" = [ "-v" true ]; "name" = "a\"\${x}\""; "port" = 3000; "tls" = null; }"#
+            r#"{ "flags" = [ "-v" true (-1) ]; "name" = "a\"\${x}\""; "port" = 3000; "tls" = null; }"#
         );
     }
 

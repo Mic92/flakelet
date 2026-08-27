@@ -16,6 +16,7 @@ let
                 default = 8080;
                 description = "export-only demo port";
               };
+              offsets = { type = types.listOf types.number; default = [ ]; };
             };
             impl =
               { options, pkgs, name, ... }:
@@ -66,6 +67,7 @@ in
           settings = {
             greeting = "hello";
             port = 8080;
+            offsets = [ (-1) ];
           };
         };
         services.static.prebuilt = prebuiltArtifact "static";
