@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 pub struct Folder {
     pub path: PathBuf,
     pub user: String,
-    pub group: String,
+    pub group: Option<String>,
     /// Owned by a DynamicUser=. systemd chowns it on start.
     pub dynamic: bool,
 }

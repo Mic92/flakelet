@@ -346,7 +346,8 @@ rec {
       owner = sc: rec {
         dynamic = isTrue (sc.DynamicUser or false);
         user = sc.User or (if dynamic then name else "root");
-        group = sc.Group or user;
+        # null: the user's login group, resolved by chown on the target.
+        group = sc.Group or null;
       };
       fromUnit =
         key:

@@ -141,7 +141,7 @@ pub fn untar_folder(folder: &Folder, archive: &Path) -> Result<()> {
             "chown",
             &[
                 "-R",
-                &format!("{}:{}", folder.user, folder.group),
+                &format!("{}:{}", folder.user, folder.group.as_deref().unwrap_or("")),
                 &dst.display().to_string(),
             ],
         )?;
@@ -309,7 +309,7 @@ mod tests {
         let folder = |p: &Path| Folder {
             path: p.into(),
             user: me.clone(),
-            group: rustix::process::getgid().as_raw().to_string(),
+            group: Some(rustix::process::getgid().as_raw().to_string()),
             dynamic: false,
         };
         let tar = tmp.path().join("0.tar");

@@ -192,7 +192,7 @@ assert
         (path: {
           inherit path;
           user = "web";
-          group = "web";
+          group = null;
           dynamic = true;
         })
         [
