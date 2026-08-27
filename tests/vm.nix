@@ -19,7 +19,11 @@ let
               offsets = { type = types.listOf types.number; default = [ ]; };
             };
             impl =
-              { options, pkgs, name, ... }:
+              { options, inputs }:
+              let
+                inherit (inputs.nixpkgs) pkgs;
+                inherit (inputs.flakelet) name;
+              in
               {
                 services.''${name} = {
                   description = "flakelet test service";
@@ -50,7 +54,11 @@ let
         { ... }:
         {
           impl =
-            { pkgs, name, ... }:
+            { inputs, ... }:
+            let
+              inherit (inputs.nixpkgs) pkgs;
+              inherit (inputs.flakelet) name;
+            in
             {
               services.${name} = {
                 description = "prebuilt flakelet service ${name}";

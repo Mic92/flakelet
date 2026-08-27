@@ -10,7 +10,11 @@ let
           { types, ... }:
           {
             impl =
-              { pkgs, name, ... }:
+              { inputs, ... }:
+              let
+                inherit (inputs.nixpkgs) pkgs;
+                inherit (inputs.flakelet) name;
+              in
               {
                 services.''${name} = {
                   wantedBy = [ "multi-user.target" ];

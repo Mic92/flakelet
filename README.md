@@ -32,7 +32,7 @@ In the service repository (`nix flake init -t github:Mic92/flakelet`):
 ```nix
 flakelets.default = { types, ... }: {
   options.port = { type = types.number; default = 8000; };
-  impl = { options, pkgs, name, ... }: {
+  impl = { options, inputs }: let inherit (inputs.nixpkgs) pkgs; inherit (inputs.flakelet) name; in {
     services.${name} = {
       wantedBy = [ "multi-user.target" ];
       serviceConfig.ExecStart = "${pkgs.web}/bin/serve --port ${toString options.port}";

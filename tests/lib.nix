@@ -14,7 +14,19 @@ let
     name = "web";
   };
 
-  checked = flakeletLib.evalOptions {
+  # Option values as impl sees them, for the given declarations and settings.
+  evalOptions =
+    options: settings:
+    (flakeletLib.evalModule (_: {
+      inherit options;
+      impl =
+        { options, ... }:
+        {
+          services.web.serviceConfig.ExecStart = "/bin/true";
+          exports.options = options;
+        };
+    }) { inherit settings; }).exports.options;
+  checked = evalOptions {
     greeting = {
       type = flakeletLib.types.string;
       description = "demo greeting";
@@ -26,6 +38,10 @@ let
     token = {
       type = flakeletLib.types.option flakeletLib.types.string;
     };
+    dir = {
+      type = flakeletLib.types.string;
+      defaultFunc = { inputs, ... }: "/var/lib/${inputs.flakelet.name}";
+    };
   } { greeting = "hi"; };
 
   evaluated = flakeletLib.evalModule (
@@ -36,12 +52,11 @@ let
         default = 9000;
       };
       impl =
-        {
-          options,
-          pkgs,
-          name,
-          ...
-        }:
+        { options, inputs }:
+        let
+          inherit (inputs.nixpkgs) pkgs;
+          inherit (inputs.flakelet) name;
+        in
         {
           services.${name}.serviceConfig.ExecStart =
             "${pkgs.coreutils}/bin/true --port ${toString options.port}";
@@ -146,45 +161,20 @@ assert
     greeting = "hi";
     port = 8080;
     token = null;
+    dir = "/var/lib/web";
   };
-assert fails (
-  flakeletLib.evalOptions {
-    p = {
-      type = flakeletLib.types.number;
-    };
-  } { q = 1; }
-);
-assert fails (
-  flakeletLib.evalOptions {
-    p = {
-      type = flakeletLib.types.number;
-    };
-  } { p = "x"; }
-);
-assert fails (
-  flakeletLib.evalOptions {
-    p = {
-      type = flakeletLib.types.number;
-    };
-  } { }
-);
-assert fails (
-  flakeletLib.evalOptions {
-    p = {
-      type = flakeletLib.types.number;
-      defaultFunc = _: 1;
-    };
-  } { p = 1; }
-);
+assert fails (evalOptions {
+  p.type = flakeletLib.types.number;
+} { q = 1; });
+assert fails (evalOptions {
+  p.type = flakeletLib.types.number;
+} { p = "x"; });
+assert fails (evalOptions {
+  p.type = flakeletLib.types.number;
+} { });
 assert evaluated.exports.ports.http.port == 9000;
 assert lib.attrNames evaluated.units == [ "web.service" ];
 assert fails (flakeletLib.evalModule { options = { }; } { settings = { }; });
-assert fails (
-  flakeletLib.evalModule (_: {
-    inputs.nixpkgs.path = "/nixpkgs";
-    impl = _: { };
-  }) { settings = { }; }
-);
 # Unknown settings are rejected even when impl never reads options.
 assert fails (
   (flakeletLib.evalModule (_: {

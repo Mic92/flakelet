@@ -35,8 +35,9 @@ The shape is documented in the
 [service module reference](reference/service-module.md). Here are the
 reasons behind it.
 
-`impl` is dependency-injected and service flakes have no inputs. The host
-decides which nixpkgs a service is built against, so a host upgrade
+A service is an [adios](https://github.com/adisbladis/adios) module and
+gets nixpkgs as an adios input from the host rather than from its own
+flake inputs. The host decides which nixpkgs a service is built against, so a host upgrade
 delivers security fixes to every service without their authors doing
 anything, and one evaluation of nixpkgs is shared by the whole batch. The
 flip side is that bumping the host's nixpkgs rebuilds and restarts every
@@ -44,9 +45,11 @@ service on the next update. A service that must not follow the host pins
 its own via `inputOverrides.nixpkgs`. Other input names are rejected,
 because `builtins.getFlake` cannot rewrite a flake's own lock purely.
 Everything a service needs beyond `pkgs` must therefore be injectable,
-which is why `contracts`, `storePath` and `extraModules` are arguments
-rather than libraries to import. adios' own `inputs`/`defaultFunc` wiring
-is not supported for the same reason.
+which is why `name`, `contracts`, `storePath` and `extraModules` come as a
+second input, `/flakelet`, rather than as libraries to import. adios was
+chosen over the NixOS module system because a service is one typed
+function call, not a fixpoint over all services, which keeps per-service
+evaluation cheap and errors local.
 
 Unit names and directories derive from the injected `name` rather than
 being fixed by the flake, so the same flake can be instantiated several
@@ -449,7 +452,7 @@ exports above. `requires` is a claim a provider must act on: "I need a
 postgres database". It travels in the same exports file:
 
 ```nix
-impl = { options, pkgs, name, contracts, ... }: {
+impl = { options, inputs }: let inherit (inputs.flakelet) name contracts; in {
   services.${name}.serviceConfig = {
     ExecStart = "${pkg}/bin/serve --db postgresql://${name}@/${name}?host=/run/postgresql";
     User = name;

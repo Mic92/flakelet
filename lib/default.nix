@@ -5,11 +5,11 @@
 #     options = {
 #       port = { type = types.number; default = 8000; description = "..."; };
 #     };
-#     impl = { options, pkgs, name, ... }: {
-#       services.${name} = {
+#     impl = { options, inputs }: {
+#       services.${inputs.flakelet.name} = {
 #         description = "My service";
 #         wantedBy = [ "multi-user.target" ];
-#         serviceConfig.ExecStart = "${pkgs.myservice}/bin/serve";
+#         serviceConfig.ExecStart = "${inputs.nixpkgs.pkgs.myservice}/bin/serve";
 #       };
 #     };
 #   };
@@ -20,8 +20,9 @@
 }:
 let
   lib = pkgs.lib;
-  # korora, as vendored by adios; the *Config sections stay freeform attrsets.
-  t = import "${adios}/types/types.nix";
+  adiosLib = import "${adios}/adios";
+  # The *Config sections stay freeform attrsets.
+  t = adiosLib.types;
 
   scalar = t.union [
     t.string
@@ -196,7 +197,6 @@ let
           ++ lib.toList (def.serviceConfig.Environment or [ ]);
       }
     );
-  adiosTypes = import "${adios}/adios/types.nix" { korora = t; };
 
   fail = msg: throw "flakelet ${name}: ${msg}";
   isTrue =
@@ -213,45 +213,8 @@ in
 rec {
   types = t;
 
-  # Adios option declarations `{ type, default?, description?, example? }`.
-  # Unknown keys are rejected; missing keys take the default, or null when
-  # the type is nullable.
-  evalOptions =
-    options: settings:
-    let
-      unknown = lib.filter (k: !(options ? ${k})) (lib.attrNames settings);
-      checkDecl =
-        n: decl:
-        let
-          e = adiosTypes.modules.option.verify decl;
-        in
-        if decl ? defaultFunc then
-          fail "in option '${n}': defaultFunc is not supported, use default"
-        else if e != null then
-          fail "in option '${n}': ${e}"
-        else
-          decl;
-      value =
-        n: decl:
-        if settings ? ${n} then
-          let
-            e = decl.type.verify settings.${n};
-          in
-          if e != null then fail "in setting '${n}': ${e}" else settings.${n}
-        else if decl ? default then
-          decl.default
-        else if decl.type.verify null == null then
-          null
-        else
-          fail "missing required setting '${n}'";
-    in
-    if unknown != [ ] then
-      fail "unknown setting(s) ${lib.concatStringsSep ", " unknown}; the module declares ${
-        if options == { } then "none" else lib.concatStringsSep ", " (lib.attrNames options)
-      }"
-    else
-      lib.mapAttrs (n: decl: value n (checkDecl n decl)) options;
-
+  # The service module becomes /<name> in an adios tree next to /nixpkgs
+  # and /flakelet, which it gets as inputs unless it declares its own.
   evalModule =
     def:
     {
@@ -261,29 +224,75 @@ rec {
     let
       m =
         if lib.isFunction def then
-          def { types = t; }
+          def adiosLib
         else
           fail "the module must be a function: { types, ... }: { options, impl }";
-    in
-    if m ? inputs then
-      fail "module inputs are not supported; pkgs, name and helpers are injected into impl"
-    else
-      let
-        options = evalOptions (m.options or { }) settings;
-      in
-      # impl may never touch options, the settings must still be checked.
-      builtins.deepSeq options render (
-        m.impl {
-          inherit options;
-          inherit
-            pkgs
-            name
-            contracts
-            storePath
-            extraModules
-            ;
-        }
+      declared = m.options or { };
+      unknown = lib.filter (k: !(declared ? ${k})) (lib.attrNames settings);
+      # adios leaves these unset, a service wants an error naming the key.
+      missing = lib.filter (
+        k:
+        let
+          o = declared.${k};
+        in
+        !(settings ? ${k} || o ? default || o ? defaultFunc || o ? options || o.type.verify null == null)
+      ) (lib.attrNames declared);
+      nullDefaults = lib.mapAttrs (_: _: null) (
+        lib.filterAttrs (
+          k: o: !(settings ? ${k} || o ? default || o ? defaultFunc || o ? options)
+        ) declared
       );
+      tree = adiosLib {
+        name = "flakelet";
+        modules = {
+          nixpkgs.options = {
+            pkgs.type = t.attrs;
+            lib.type = t.attrs;
+          };
+          flakelet.options = {
+            name.type = t.string;
+            contracts.type = t.attrs;
+            storePath.type = t.function;
+            extraModules.type = t.listOf t.attrs;
+          };
+          ${name} = m // {
+            inputs = {
+              nixpkgs.path = "/nixpkgs";
+              flakelet.path = "/flakelet";
+            }
+            // (m.inputs or { });
+          };
+        };
+      };
+      applied = tree {
+        options = {
+          "/nixpkgs" = {
+            inherit pkgs lib;
+          };
+          "/flakelet" = {
+            inherit
+              name
+              contracts
+              storePath
+              extraModules
+              ;
+          };
+          "/${name}" = nullDefaults // settings;
+        };
+      };
+      svc = applied.modules.${name};
+    in
+    if !(m ? impl) then
+      fail "the module has no impl"
+    else if unknown != [ ] then
+      fail "unknown setting(s) ${lib.concatStringsSep ", " unknown}; the module declares ${
+        if declared == { } then "none" else lib.concatStringsSep ", " (lib.attrNames declared)
+      }"
+    else if missing != [ ] then
+      fail "missing required setting(s) ${lib.concatStringsSep ", " missing}"
+    else
+      # impl may never touch options, the settings must still be checked.
+      builtins.deepSeq svc.args.options (render (svc { }));
 
   # Validate the attrset impl returns and render it into unit files.
   render =

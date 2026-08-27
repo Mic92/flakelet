@@ -6,9 +6,10 @@ Start from the template:
 $ nix flake init -t github:Mic92/flakelet
 ```
 
-A service flake exports one function under `flakelets.<attr>`. It does not
-need a nixpkgs input: `pkgs`, `lib` and `types` are injected by the host.
-Other flake inputs work as usual.
+A service flake exports an [adios](https://github.com/adisbladis/adios)
+module under `flakelets.<attr>`. It does not need a nixpkgs flake input:
+the host hands in `pkgs` and the entry `name` as adios inputs. Other
+flake inputs work as usual.
 
 ```nix
 {
@@ -20,7 +21,10 @@ Other flake inputs work as usual.
         description = "TCP port the HTTP server listens on.";
       };
 
-      impl = { options, pkgs, name, ... }: {
+      impl = { options, inputs }: let
+        inherit (inputs.nixpkgs) pkgs;
+        inherit (inputs.flakelet) name;
+      in {
         services.${name} = {
           description = "${name} example service";
           wantedBy = [ "multi-user.target" ];
@@ -38,11 +42,16 @@ Other flake inputs work as usual.
 
 `options` declares what the host may pass as `settings`. flakelet checks
 the settings against it before `impl` runs. Unknown keys, wrong types and
-missing required options fail the update and name the offending key.
+missing required options fail the update and name the offending key. A
+default may depend on other values:
+`defaultFunc = { inputs, ... }: "/var/lib/${inputs.flakelet.name}"`.
 
-`impl` receives the checked `options`, the host's `pkgs` and the entry
-`name` the host chose. Derive unit names and directories from `name`. The
-host can then run the same flake twice under different names.
+`impl` receives the checked `options` and two inputs: `inputs.nixpkgs`
+(`pkgs`, `lib`) and `inputs.flakelet` (`name`, `contracts`, `storePath`,
+[…](../reference/service-module.md#impl--options-inputs-)). Derive unit
+names and directories from `name` so the host can run the same flake
+twice under different names. The examples below assume the `let inherit
+…` from above.
 
 The return value is shaped like NixOS' `systemd.*` options
 ([full list](../reference/service-module.md)). Unknown keys are rejected,
@@ -63,7 +72,7 @@ The attribute equal to `name` becomes `<name>.service`. Every other
 attribute `foo` becomes `<name>-foo.<type>`. So a worker and a timer:
 
 ```nix
-impl = { pkgs, name, ... }: {
+impl = { options, inputs }: … {
   services.${name} = { … };
   services.worker = {
     serviceConfig.ExecStart = "${pkgs.myservice}/bin/worker";
@@ -92,7 +101,7 @@ the first connection and a timer's job runs on schedule, not at deploy
 time ([exact rules](../reference/service-module.md#activation-semantics)).
 
 ```nix
-impl = { options, pkgs, name, ... }: {
+impl = { options, inputs }: … {
   # no wantedBy: started by the socket
   services.${name}.serviceConfig = {
     ExecStart = "${pkgs.myservice}/bin/serve";
@@ -118,7 +127,7 @@ For an end-to-end probe, return `healthCheck`. flakelet runs it as
 rolls back:
 
 ```nix
-impl = { options, pkgs, name, ... }: {
+impl = { options, inputs }: … {
   services.${name} = { … };
 
   healthCheck = pkgs.writeShellScript "${name}-health" ''
@@ -161,7 +170,7 @@ run as the main unit's user with its `StateDirectory=`. The other units
 are stopped while they run:
 
 ```nix
-impl = { pkgs, name, ... }: {
+impl = { options, inputs }: … {
   services.${name}.serviceConfig = {
     ExecStart = "${pkgs.myservice}/bin/serve --db /var/lib/${name}/db.sqlite";
     DynamicUser = true;
@@ -202,7 +211,7 @@ exports.state.extraFolders = [ "/srv/media" ];
 reverse-proxy route and a database:
 
 ```nix
-impl = { options, name, contracts, ... }: {
+impl = { options, inputs }: let inherit (inputs.flakelet) name contracts; in {
   services.${name}.serviceConfig = { … };
   exports = {
     http.web = contracts.http {
@@ -224,7 +233,7 @@ a path and load it in the unit:
 
 ```nix
 options.tokenFile = { type = types.string; };
-impl = { options, name, ... }: {
+impl = { options, inputs }: … {
   services.${name}.serviceConfig = {
     LoadCredential = "token:${options.tokenFile}";
     ExecStart = "… --token-file \${CREDENTIALS_DIRECTORY}/token";
@@ -241,7 +250,7 @@ flakelet gc-roots such paths per generation, so referencing them at
 runtime is fine. If the build itself must read the file, wrap it:
 
 ```nix
-impl = { options, storePath, ... }: {
+impl = { options, inputs }: let inherit (inputs.flakelet) storePath; in {
   services.web.serviceConfig.ExecStart =
     "… --ca ${storePath options.caBundle}";
 };

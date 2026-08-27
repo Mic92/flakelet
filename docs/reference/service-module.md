@@ -5,35 +5,36 @@ For a walk-through see [Writing a service](../guides/writing-a-service.md).
 ## Flake output
 
 ```
-flakelets.<attr> = { types, ... }: { options = { … }; impl = { … }: { … }; }
+flakelets.<attr> = { types, ... }: { options = { … }; impl = { options, inputs }: { … }; }
 ```
 
-The host selects `<attr>` with `output` (default `flakelets.default`). The
-value may also be an attrset of such functions. The flake must not rely on
-its own `inputs`. Adios' `inputs`/`defaultFunc` wiring is not supported.
-
-### Outer function arguments
-
-| arg     | value                                          |
-| ------- | ---------------------------------------------- |
-| `types` | korora types as vendored by adios (`types.string`, `types.number`, `types.bool`, `types.listOf`, `types.attrsOf`, `types.option` (nullable), `types.struct`, …) |
+An [adios](https://github.com/adisbladis/adios) module. The outer function
+receives adios itself (`types`, `lib`). The host selects `<attr>` with
+`output` (default `flakelets.default`); the value may also be an attrset
+of such functions. flakelet loads it into a module tree next to
+`/nixpkgs` and `/flakelet` and declares both as its `inputs` unless the
+module declares `inputs` itself.
 
 ### `options`
 
-Attrset of `{ type; default ? ; description ? ; }`. Host `settings` are
-checked against it before `impl` is called: unknown keys, type mismatches
-and missing options without `default` abort the update.
+Attrset of `{ type; default ? ; defaultFunc ? ; description ? ; example ? ; }`
+with `types.*` from adios (`string`, `int`, `number`, `bool`, `listOf`,
+`attrsOf`, `option` (nullable), `struct`, `enum`, …). `defaultFunc =
+{ options, inputs }: …` computes a default from other options or inputs.
+Host `settings` are checked against the declarations before `impl` is
+called: unknown keys, type mismatches and missing options without a
+default abort the update.
 
-### `impl` arguments
+### `impl { options, inputs }`
 
-| arg            | value                                                                 |
-| -------------- | --------------------------------------------------------------------- |
-| `options`      | checked settings with defaults applied                                |
-| `pkgs`         | host nixpkgs (or `inputOverrides.nixpkgs`), one instance per batch    |
-| `name`         | entry name chosen by the host                                         |
-| `contracts`    | constructors for blessed export schemas, see [contracts](contracts.md) |
-| `storePath`    | `string -> string`: add string context to a `/nix/store/…` path from settings so the build depends on it |
-| `extraModules` | list from `services.flakelets.extraModules`, imported                 |
+| arg                            | value                                                                 |
+| ------------------------------ | --------------------------------------------------------------------- |
+| `options`                      | checked settings with defaults applied                                |
+| `inputs.nixpkgs.pkgs`, `.lib`  | host nixpkgs (or `inputOverrides.nixpkgs`), one instance per batch    |
+| `inputs.flakelet.name`         | entry name chosen by the host                                         |
+| `inputs.flakelet.contracts`    | constructors for blessed export schemas, see [contracts](contracts.md) |
+| `inputs.flakelet.storePath`    | `string -> string`: add string context to a `/nix/store/…` path from settings so the build depends on it |
+| `inputs.flakelet.extraModules` | list from `services.flakelets.extraModules`, imported                 |
 
 ## `impl` return value
 
