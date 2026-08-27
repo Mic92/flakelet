@@ -70,8 +70,8 @@ $ flakelet import web.tar.zst --name web-staging --settings staging.json
 A service with `exports.requires.postgres` does not dump the database
 itself. `export` calls the postgres provider's dump hook, `import` calls
 its restore hook, which also creates the database on the target. This only
-works if the provider on both hosts announces `state` support; `--dry-run`
-tells you.
+works if the provider on both hosts announces `state` support (check with
+`--dry-run`).
 
 ## Static users
 
