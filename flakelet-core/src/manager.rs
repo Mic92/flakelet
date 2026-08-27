@@ -658,7 +658,6 @@ impl Manager {
             state: manifest.state.expect("blockers checked state.json"),
             exports: manifest.exports,
             consistency: "stopped".into(),
-            path_settings: transfer::path_settings(&svc.settings),
         };
         Ok((meta, svc, manifest.units))
     }
