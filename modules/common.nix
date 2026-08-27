@@ -143,11 +143,12 @@ in
   config = lib.mkIf cfg.enable {
     services.flakelets.configFile = json.generate "flakelet-config.json" {
       version = 1;
+      system = pkgs.stdenv.hostPlatform.system;
       eval_user = "flakelet";
       nixpkgs = "${cfg.nixpkgs}";
       adios = "${cfg.adios}";
       flakelet_lib = "${cfg.flakeletLib}";
-      extra_modules = map toString cfg.extraModules;
+      extra_modules = map (p: "${p}") cfg.extraModules;
       eval = {
         workers = cfg.eval.workers;
         max_memory_mb = cfg.eval.maxMemoryMb;

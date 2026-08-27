@@ -8,6 +8,27 @@
 let
   cfg = config.services.flakelets;
   flakelet = lib.getExe cfg.package;
+  updateService = args: {
+    wants = [ "network-online.target" ];
+    after = [
+      "network-online.target"
+      "flakelet-reconcile.service"
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      Nice = 10;
+      IOSchedulingClass = "idle";
+      MemoryHigh = "75%";
+      ExecStart = lib.escapeShellArgs (
+        [
+          flakelet
+          "update"
+          "--offline-fallback"
+        ]
+        ++ args
+      );
+    };
+  };
 in
 {
   config = lib.mkIf cfg.enable {
@@ -41,6 +62,7 @@ in
         before = [ "flakelet.target" ];
         serviceConfig = {
           Type = "oneshot";
+          RemainAfterExit = true;
           ExecStart = "${flakelet} boot";
         };
       };
@@ -54,36 +76,43 @@ in
         restartTriggers = [ cfg.configFile ];
         serviceConfig = {
           Type = "oneshot";
+          # Stay active so a switch only re-runs this when the trigger changes.
+          RemainAfterExit = true;
           ExecStart = "${flakelet} reconcile";
         };
       };
     }
+    # Runs once per definition change.
     // lib.mapAttrs' (
       name: svc:
-      lib.nameValuePair "flakelet-${name}" {
-        description = "Update flakelet service ${name}";
-        wantedBy = [ "multi-user.target" ];
-        wants = [ "network-online.target" ];
-        after = [
-          "network-online.target"
-          "flakelet-reconcile.service"
-        ];
-        before = [ "flakelet.target" ];
-        # Restart (and thereby update) when the service definition changes.
-        restartTriggers = [ (builtins.hashString "sha256" (builtins.toJSON svc)) ];
-        serviceConfig = {
-          Type = "oneshot";
-          Nice = 10;
-          IOSchedulingClass = "idle";
-          MemoryHigh = "75%";
-          ExecStart = "${flakelet} update --offline-fallback ${name}";
-        };
-      }
-    ) cfg.services;
+      lib.nameValuePair "flakelet-${name}" (
+        lib.recursiveUpdate (updateService [ name ]) {
+          description = "Update flakelet service ${name}";
+          wantedBy = [ "multi-user.target" ];
+          before = [ "flakelet.target" ];
+          restartTriggers = [ (builtins.hashString "sha256" (builtins.toJSON svc)) ];
+          serviceConfig.RemainAfterExit = true;
+        }
+      )
+    ) cfg.services
+    # The timer needs a unit that goes inactive after each run.
+    // lib.mapAttrs' (
+      name: _:
+      lib.nameValuePair "flakelet-${name}-auto" (
+        # Timer ticks must not queue up behind a running update.
+        updateService [
+          "--no-wait"
+          name
+        ]
+        // {
+          description = "Scheduled update of flakelet service ${name}";
+        }
+      )
+    ) (lib.filterAttrs (_: svc: svc.autoUpdate.enable) cfg.services);
 
     systemd.timers = lib.mapAttrs' (
       name: svc:
-      lib.nameValuePair "flakelet-${name}" {
+      lib.nameValuePair "flakelet-${name}-auto" {
         wantedBy = [ "timers.target" ];
         timerConfig = {
           OnCalendar = svc.autoUpdate.interval;

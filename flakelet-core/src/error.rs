@@ -38,12 +38,10 @@ pub enum Error {
     NothingToCheck,
     #[error("output '{output}' of '{service}' is not a dotted attribute path")]
     InvalidOutput { service: String, output: String },
-    #[error("invalid service name '{0}': use letters, digits, '-', '_' or '.'")]
+    #[error("invalid service name '{0}': use letters, digits, '-' or '_'")]
     InvalidServiceName(String),
     #[error("service '{0}' was never deployed")]
     NeverDeployed(String),
-    #[error("current generation of '{0}' predates diff support; run an update first")]
-    NoArtifactRecorded(String),
     #[error("service '{0}' has no older generation to roll back to")]
     NoOlderGeneration(String),
     #[error("settings of '{service}' reference dangling store path {path}")]

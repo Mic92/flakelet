@@ -246,6 +246,14 @@ pub fn user_exists(name: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Path components equal to the old entry name become the new one,
+/// mirroring how units derive their directories from `name`.
+pub fn rename_folder(path: &Path, old: &str, new: &str) -> PathBuf {
+    path.iter()
+        .map(|c| if c == old { new.as_ref() } else { c })
+        .collect()
+}
+
 pub fn hostname() -> String {
     rustix::system::uname()
         .nodename()
@@ -301,6 +309,18 @@ mod tests {
             "smtp": { "passwordFile": "/run/s" }
         });
         assert_eq!(path_settings(&s), ["cert", "smtp.passwordFile"]);
+    }
+
+    #[test]
+    fn folders_follow_the_entry_name() {
+        assert_eq!(
+            rename_folder(Path::new("/var/lib/web"), "web", "web2"),
+            Path::new("/var/lib/web2")
+        );
+        assert_eq!(
+            rename_folder(Path::new("/srv/webdata"), "web", "web2"),
+            Path::new("/srv/webdata")
+        );
     }
 
     #[test]

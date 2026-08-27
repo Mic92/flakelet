@@ -127,8 +127,8 @@ All units of one entry form one generation. They are activated together and
 rolled back together, so a service consisting of a `.service` and a `.socket`
 never ends up half-updated.
 
-Unit names must start with the entry name. flakelet enforces this and refuses
-to activate a unit name that already belongs to another managed service or to
+Entry names consist of letters, digits, `-` and `_`. Unit names must
+start with the entry name. flakelet enforces this and refuses to activate a unit name that already belongs to another managed service or to
 the host itself, because silently overriding someone else's unit would be a
 debugging nightmare. The supported unit types are `.service`, `.socket`,
 `.target`, `.timer` and `.path`. Mounts and users are host concerns; if a
@@ -326,17 +326,18 @@ how CI-primed deployments and tests avoid running any evaluation on the
 target machine, while `meta.json` keeps the provenance visible in
 `flakelet status`.
 
-`/var/lib/flakelet/<name>/state.json` records what is currently deployed. It
-is written atomically via a temporary file and rename:
+`/var/lib/flakelet/<name>/state.json` records which generation is active.
+Units, exports, state folders and the flake URL are read from that
+generation's manifest, so a switch or rollback is a single field and the
+two cannot disagree. It is written atomically via a temporary file and
+rename:
 
 ```jsonc
 {
   "origin": "declarative" | "manual",
   "generation": 4,                          // null if never deployed
-  "units": { "grafana.service": "/nix/store/…-grafana.service" },
-  "locked_url": "github:me/grafana-svc/<rev>",
   "pin": null,                              // set by `flakelet lock`
-  "hold": { "reason": "…", "settings_hash": "sha256-…", "flake_rev": "<rev>" },
+  "hold": { "reason": "…", "artifact": "/nix/store/…-flakelet-grafana" },
   "degraded": false,                        // cached generation after offline eval failure
   "last_error": null
 }
@@ -395,8 +396,9 @@ runs reconcile through a unit that restarts whenever config.json changes, and
 ## Update flow
 
 Boot comes first. `flakelet-boot.service` re-links the current generations
-into `/run/systemd/system` and sweeps any stale flakelet-managed symlinks a
-crash may have left behind. It runs before `flakelet.target`, so other host
+into `/run/systemd/system` and queues start jobs for their `[Install]`
+units (`--no-block`, since it runs inside the boot transaction, which was
+computed before these units existed). It runs before `flakelet.target`, so other host
 units that want to order themselves after "the flakelet services are up" can
 depend on that target. The boot unit needs no evaluation and no network,
 which matters for machines that boot while offline.
@@ -411,32 +413,37 @@ because a human can actually do something about it.
 
 A regular update proceeds like this:
 
-1. If the service is held from a previous failed deploy and neither the
-   settings hash nor the flake revision has changed, skip it. This is the
-   anti-flapping rule: without it a broken update would be retried by every
-   timer tick.
-2. Evaluate and build the new generation. If this fails, keep the current
-   generation, record the error in the state and exit non-zero.
-3. If the new units are identical to the running ones, there is nothing to
-   do.
-4. Otherwise switch: first stop, disable and unlink the units that
-   disappeared, so a renamed unit releases its ports before its successor
-   starts. Then link the new generation's units into `/run/systemd/system`,
-   reload systemd, and for every changed or new unit: enable and restart it
-   if it has an `[Install]` section; otherwise only try-restart it if it is
-   currently running. Units without `[Install]` are pulled in on demand, so a
-   socket-activated service stays inactive until a connection arrives and a
-   timer's job does not fire just because the service was deployed. If any of
-   this fails, switch back to the previous generation's units.
+1. Evaluate and build the new generation (or take the prebuilt artifact).
+   If this fails, keep the current generation, record the error in the
+   state and exit non-zero.
+2. If the resulting artifact is the one a previous activation failed on,
+   skip it. This is the anti-flapping rule: without it a broken update
+   would restart the working service on every timer tick. Keying the hold
+   on the artifact covers settings, revision, host nixpkgs and prebuilt
+   paths alike; `--force` overrides it.
+3. If the artifact is the active generation's, there is nothing to do.
+4. Otherwise switch the entry as a whole: publish the new exports (so a
+   provider can act on `requires.*` before the units need it), stop,
+   disable and unlink all units of the old generation in one job, link the
+   new generation's units into `/run/systemd/system`, reload systemd, clear
+   any `failed` state left from before, then enable and start the units
+   that have an `[Install]` section. Units without one are pulled in on
+   demand, so a socket-activated service stays inactive until a connection
+   arrives and a timer's job does not fire just because the service was
+   deployed. Treating the entry as a unit avoids per-unit ordering problems
+   (a socket cannot be restarted while its service runs) and never leaves a
+   mix of two generations loaded.
 5. Verify health. If the generation ships a `<name>-health.service` probe
    unit, start it and treat a failed start job as unhealthy; systemd provides
    the timeout, the journal entry and the sandbox. Then no unit of the
    service may be in the `failed` state; socket- and timer-activated units
    are allowed to be inactive.
-6. If activation or the health probe failed, switch back to the previous
-   generation. Its unit files still exist in the store and have their old
-   settings baked in, so this is a pure symlink-and-restart operation. Record
-   a hold with the reason and exit non-zero.
+6. If activation or the health probe failed, delete the new generation
+   directory (it never ran, so it is no rollback target), re-publish the
+   previous exports and switch back to the previous generation. Its unit
+   files still exist in the store and have their old settings baked in, so
+   this is a pure symlink-and-restart operation. Record a hold with the
+   reason and exit non-zero.
 7. On success, write the new state, publish the exports and prune old
    generations beyond the retention limit.
 
@@ -582,10 +589,11 @@ from the host's own flake inputs, so they are part of the host closure and
 cannot be garbage-collected before the services root them per generation.
 
 Every configured service gets a oneshot `flakelet-<name>.service` that runs
-`flakelet update <name>`. The oneshot restarts whenever the service's entry
-in the configuration changes, and it is ordered after
-`flakelet-reconcile.service` so removals happen before additions. Enabling
-`autoUpdate` adds a timer with the configured interval; a per-host stable
+`flakelet update <name>`. It is `RemainAfterExit`, so a configuration
+switch re-runs it only when the service's entry changed, and it is ordered
+after `flakelet-reconcile.service` so removals happen before additions.
+Enabling `autoUpdate` adds `flakelet-<name>-auto.timer` and a matching
+non-remaining oneshot with the configured interval; a per-host stable
 random delay (`RandomizedDelaySec` with `FixedRandomDelay`) spreads the
 firings across a fleet, so one new revision does not restart the service on
 every machine at the same moment. In practice updates
@@ -832,8 +840,9 @@ store paths.
 flakelet version 1 assumes you only run flakes you control. There is no
 signature verification of any kind. Isolation is exactly what the units
 configure through `DynamicUser=` and other sandboxing directives, plus the
-fact that evaluation runs as an unprivileged user. `flakelet lock` exists to
-pin a service to a known revision until you have reviewed the next one.
+fact that evaluation runs as an unprivileged user. `flakelet lock` pins a
+service to the revision of its active generation until you have reviewed
+the next one.
 
 ## Out of scope
 

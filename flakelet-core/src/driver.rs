@@ -19,7 +19,8 @@ pub struct DriverEntry<'a> {
 /// Render the driver expression that is added to the store and evaluated with
 /// nix-eval-jobs. Each attribute builds a self-describing artifact:
 /// meta.json, state.json, units/<unit files> and optional exports.json.
-pub fn render(config: &Config, system: &str, entries: &[DriverEntry]) -> String {
+pub fn render(config: &Config, entries: &[DriverEntry]) -> String {
+    let system = config.system.as_str();
     let nixpkgs = config
         .nixpkgs
         .as_ref()
@@ -113,6 +114,8 @@ pub fn json_to_nix(value: &Value) -> String {
     match value {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
+        // A leading minus is an operator in Nix, not part of the literal.
+        Value::Number(n) if n.to_string().starts_with('-') => format!("({n})"),
         Value::Number(n) => n.to_string(),
         Value::String(s) => nix_string(s),
         Value::Array(items) => {
@@ -145,10 +148,11 @@ mod tests {
 
     #[test]
     fn json_to_nix_conversion() {
-        let v = json!({ "port": 3000, "tls": null, "flags": ["-v", true], "name": "a\"${x}\"" });
+        let v =
+            json!({ "port": 3000, "tls": null, "flags": ["-v", true, -1], "name": "a\"${x}\"" });
         assert_eq!(
             json_to_nix(&v),
-            r#"{ "flags" = [ "-v" true ]; "name" = "a\"\${x}\""; "port" = 3000; "tls" = null; }"#
+            r#"{ "flags" = [ "-v" true (-1) ]; "name" = "a\"\${x}\""; "port" = 3000; "tls" = null; }"#
         );
     }
 
@@ -158,12 +162,12 @@ mod tests {
             nixpkgs: Some("/nix/store/aaa-source".into()),
             adios: Some("/nix/store/bbb-adios".into()),
             flakelet_lib: Some("/nix/store/ccc-flakelet-lib".into()),
+            system: "x86_64-linux".into(),
             ..Config::default()
         };
         let settings = json!({ "port": 3000 });
         let expr = render(
             &config,
-            "x86_64-linux",
             &[DriverEntry {
                 name: "grafana",
                 locked_url: "github:me/grafana-svc/abc?narHash=sha256-xyz",
@@ -196,12 +200,12 @@ mod tests {
             nixpkgs: Some("/nix/store/aaa-source".into()),
             adios: Some("/nix/store/bbb-adios".into()),
             flakelet_lib: Some("/nix/store/ccc-flakelet-lib".into()),
+            system: "x86_64-linux".into(),
             ..Config::default()
         };
         let settings = json!({});
         let expr = render(
             &config,
-            "x86_64-linux",
             &[DriverEntry {
                 name: "svc",
                 locked_url: "github:me/svc/abc?narHash=sha256-xyz",
