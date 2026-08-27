@@ -117,9 +117,9 @@ at evaluation time and writes a `state.json` into the artifact, so core
 never parses unit files and a CI build sees the same description. A service
 that needs to serialise something before its folders are copied ships a
 `<name>-dump.service` oneshot (sugar: `dumpScript`), one that needs to load
-it afterwards a `<name>-restore.service` (`restoreScript`). Both run as the
-main unit's user with its `StateDirectory=` while the other units are
-stopped, and must not read or write outside those folders. State outside
+it afterwards a `<name>-restore.service` (`restoreScript`). Like the
+`healthCheck` sugar, both run as the main unit's user with its
+`StateDirectory=`. They run while the other units are stopped, and must not read or write outside those folders. State outside
 the directives is listed in `exports.state.extraFolders`, which requires a
 static `User=`.
 

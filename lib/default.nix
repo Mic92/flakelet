@@ -185,7 +185,9 @@ let
     section "Service" (
       # exec instead of systemd's simple: a missing binary or User= then
       # fails the start job and with it the deploy.
-      { Type = "exec"; }
+      {
+        Type = "exec";
+      }
       // (def.serviceConfig or { })
       // lib.optionalAttrs (env != { }) {
         # toJSON escapes quotes and backslashes in values.
@@ -287,8 +289,9 @@ rec {
     let
       a = check argsType args;
       main = a.services.${name}.serviceConfig or { };
-      # dump/restore run as the main unit's user. systemd keys dynamic users
-      # by name, so an explicit User= yields the same uid.
+      # Sugar units run as the main unit's user so probes reach 0660 sockets
+      # and dump/restore reach the state. systemd keys dynamic users by name,
+      # so an explicit User= yields the same uid.
       identity =
         lib.optionalAttrs (isTrue (main.DynamicUser or false)) { User = name; }
         // builtins.intersectAttrs {
@@ -298,12 +301,16 @@ rec {
           StateDirectory = 1;
         } main;
       sugar =
-        key: opt: serviceConfig:
+        key: opt:
+        {
+          needsState ? true,
+          extra ? { },
+        }:
         if !(a ? ${opt}) then
           { }
         else if a ? services.${key} then
           fail "${opt} and services.${key} are mutually exclusive"
-        else if serviceConfig == identity && !(main ? StateDirectory) then
+        else if needsState && !(main ? StateDirectory) then
           fail "${opt} needs services.${name} with a StateDirectory= to read and write"
         else
           {
@@ -313,17 +320,18 @@ rec {
                 Type = "oneshot";
                 ExecStart = a.${opt};
               }
-              // serviceConfig;
+              // identity
+              // extra;
             };
           };
       services =
         (a.services or { })
         // sugar "health" "healthCheck" {
-          DynamicUser = true;
-          TimeoutStartSec = "1min";
+          needsState = false;
+          extra.TimeoutStartSec = "1min";
         }
-        // sugar "dump" "dumpScript" identity
-        // sugar "restore" "restoreScript" identity;
+        // sugar "dump" "dumpScript" { }
+        // sugar "restore" "restoreScript" { };
       units =
         renderGroup ".service" serviceSection services
         // renderGroup ".socket" (def: section "Socket" (def.socketConfig or { })) (a.sockets or { })
