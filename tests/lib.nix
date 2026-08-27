@@ -263,7 +263,7 @@ runCommand "flakelet-lib-test" { units = linkFarm "flakelet-lib-test-units" resu
   grep -qx 'DynamicUser=true' $s
   grep -qx 'Environment="FOO=bar"' $s
   grep -qxF 'Environment="QUOTED=va\"lue"' $s
-  grep -qx 'Environment="PATH=${lib.makeBinPath [ hello ]}"' $s
+  grep -q '^Environment="PATH=${lib.makeBinPath [ hello ]}:.*coreutils' $s
   grep -qx 'WantedBy=multi-user.target' $s
   grep -qx 'ListenStream=8080' $units/web.socket
   grep -qx 'OnCalendar=daily' $units/web-gc.timer

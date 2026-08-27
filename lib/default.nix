@@ -169,9 +169,18 @@ let
   serviceSection =
     def:
     let
-      env =
-        lib.optionalAttrs (def.path or [ ] != [ ]) { PATH = lib.makeBinPath def.path; }
-        // (def.environment or { });
+      # NixOS' baseline, so ported scripts keep working.
+      path = (def.path or [ ]) ++ [
+        pkgs.coreutils
+        pkgs.findutils
+        pkgs.gnugrep
+        pkgs.gnused
+        pkgs.systemdMinimal
+      ];
+      env = {
+        PATH = "${lib.makeBinPath path}:${lib.makeSearchPathOutput "bin" "sbin" path}";
+      }
+      // (def.environment or { });
     in
     section "Service" (
       (def.serviceConfig or { })
