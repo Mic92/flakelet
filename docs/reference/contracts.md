@@ -72,7 +72,7 @@ Implementation: [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)
 Local socket, peer authentication, no password. The service connects as
 `User=<role>` to `/run/postgresql`. Implementation:
 [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)
-(export/import: not yet).
+(export/import supported).
 
 ## Provider rules
 
