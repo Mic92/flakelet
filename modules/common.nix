@@ -147,7 +147,7 @@ in
       nixpkgs = "${cfg.nixpkgs}";
       adios = "${cfg.adios}";
       flakelet_lib = "${cfg.flakeletLib}";
-      extra_modules = map toString cfg.extraModules;
+      extra_modules = map (p: "${p}") cfg.extraModules;
       eval = {
         workers = cfg.eval.workers;
         max_memory_mb = cfg.eval.maxMemoryMb;
