@@ -472,7 +472,7 @@ the complexity this design avoids.
 Providers run on the host, typically as NixOS modules, because they own
 host-scope resources: ports 80/443 and certificates for nginx, the superuser
 socket for postgres. A provider may also be a flakelet itself. The
-[provider rules](reference/contracts.md#provider-rules) follow from a few
+[provider rules](reference/contracts.md#writing-a-provider) follow from a few
 decisions:
 
 - Level-triggered reconciliation from the whole exports directory rather
