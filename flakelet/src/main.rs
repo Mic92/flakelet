@@ -5,6 +5,7 @@ use flakelet_core::{CheckOpts, Manager, Result, UpdateOpts, UpdateOutcome};
 use lexopt::prelude::*;
 use serde_json::Value;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -21,7 +22,7 @@ Commands:
                         Register and deploy a service outside the host configuration
   activate <name> <store path>
                         Register and start a prebuilt service artifact (no evaluation)
-  remove <name>         Stop a service and delete its state and generations
+  remove <name>         Stop a service and delete its generations
   reconcile             Remove declarative services that vanished from the host configuration
   check [<name>...] [--build] [--gc-roots-dir <dir>] [--machine <name> [--flake <ref>]]
                         Resolve and evaluate configured services without touching state (CI)
@@ -33,6 +34,10 @@ Commands:
                         Show service status
   diff <name>           Closure diff between the running generation and a fresh evaluation
   rollback <name>       Switch back to the previous generation
+  export <name> [-o <file>|-] [--dry-run]
+                        Stop the service and archive its state for another machine
+  import <file>|- [--name <name>] [--settings <file>] [update options]
+                        Restore an exported service and start it
   lock <name>           Pin a service to the currently resolved flake revision
   unlock <name>         Remove the pin
   gc [--keep <n>]       Prune old generations
@@ -104,9 +109,11 @@ Example:
   flakelet activate web /nix/store/...-flakelet-web
 ",
         "remove" => "\
-Usage: flakelet remove <name>
+Usage: flakelet remove [--purge] <name>
 
-Stop a service and delete its state and generations.
+Stop a service, unlink its units and delete its generations and flakelet
+bookkeeping. The service's own state folders (StateDirectory=) are kept
+and listed. --purge empties them too.
 
 Example:
   flakelet remove web
@@ -161,6 +168,33 @@ Closure diff between the running generation and a fresh evaluation.
 Example:
   flakelet diff web
 ",
+        "export" => "\
+Usage: flakelet export <name> [-o <file>|-] [--dry-run]
+
+Stop all units of the service, run its <name>-dump.service and provider
+dumps, archive the StateDirectory= folders and start the units again.
+The zstd tar goes to stdout unless -o names a file. It carries the locked
+flake ref and settings but no store paths and no secrets. Progress is on
+stderr. --dry-run prints what would be exported as JSON, or why not.
+
+Examples:
+  flakelet export web | ssh hostb flakelet import -
+  flakelet export web -o web.flakelet.tar.zst
+  flakelet export web --dry-run | jq .state
+",
+        "import" => "\
+Usage: flakelet import <file>|- [--name <name>] [--settings <file>] [update options]
+
+Build the exported service (pinned to the exported revision), restore its
+state folders and provider resources, run <name>-restore.service and
+activate. If <name> is already declared on this host that entry is used
+and --settings is ignored; otherwise a manual service is registered.
+State folders on this host must be empty.
+
+Examples:
+  ssh hosta flakelet export web | flakelet import -
+  flakelet import web.flakelet.tar.zst --name web2 --settings web2.json
+",
         "rollback" => "\
 Usage: flakelet rollback <name>
 
@@ -206,10 +240,12 @@ enum Cmd {
     Deploy {
         name: String,
         svc: Box<ServiceConfig>,
+        settings: Option<PathBuf>,
         opts: UpdateOpts,
     },
     Remove {
         name: String,
+        purge: bool,
     },
     Reconcile,
     Check {
@@ -230,6 +266,16 @@ enum Cmd {
     },
     Rollback {
         name: String,
+    },
+    Export {
+        name: String,
+        out: Option<PathBuf>,
+    },
+    Import {
+        archive: PathBuf,
+        name: Option<String>,
+        settings: Option<PathBuf>,
+        opts: UpdateOpts,
     },
     Lock {
         name: String,
@@ -305,6 +351,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut keep = None;
     let mut check = CheckOpts::default();
     let mut machine = None;
+    let mut out = None;
+    let mut dry_run = false;
+    let mut purge = false;
+    let mut name_opt = None;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => {
@@ -324,6 +374,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("out-link") => check.out_links = Some(PathBuf::from(parser.value()?)),
             Long("machine") => machine = Some(parser.value()?.string()?),
             Long("keep") => keep = Some(parser.value()?.parse()?),
+            Short('o') | Long("output-file") => out = Some(PathBuf::from(parser.value()?)),
+            Long("dry-run") => dry_run = true,
+            Long("purge") => purge = true,
+            Long("name") => name_opt = Some(parser.value()?.string()?),
             Value(v) => names.push(v.string()?),
             _ => return Err(arg.unexpected()),
         }
@@ -350,10 +404,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             name: one_name(&names)?,
             svc: Box::new(ServiceConfig {
                 flake: flake.clone().ok_or("deploy requires --flake")?,
-                settings: read_settings(settings.as_deref()).map_err(|e| e.to_string())?,
                 output: output.unwrap_or_else(|| ServiceConfig::default().output),
                 ..Default::default()
             }),
+            settings,
             opts,
         },
         "activate" => match &names[..] {
@@ -363,12 +417,14 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
                     prebuilt: Some(path.into()),
                     ..Default::default()
                 }),
+                settings: None,
                 opts,
             },
             _ => return Err("activate expects <name> <store path>".into()),
         },
         "remove" => Cmd::Remove {
             name: one_name(&names)?,
+            purge,
         },
         "reconcile" => Cmd::Reconcile,
         "check" => {
@@ -392,6 +448,26 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         },
         "rollback" => Cmd::Rollback {
             name: one_name(&names)?,
+        },
+        "export" => {
+            let out = (!dry_run).then(|| out.unwrap_or_else(|| "-".into()));
+            if out.as_deref() == Some(Path::new("-")) && std::io::stdout().is_terminal() {
+                return Err(
+                    "refusing to write an archive to a terminal, use -o <file> or a pipe".into(),
+                );
+            }
+            Cmd::Export {
+                name: one_name(&names)?,
+                out,
+            }
+        }
+        "import" => Cmd::Import {
+            archive: one_name(&names)
+                .map_err(|_| "expected one archive path")?
+                .into(),
+            name: name_opt,
+            settings,
+            opts,
         },
         "lock" => Cmd::Lock {
             name: one_name(&names)?,
@@ -462,14 +538,28 @@ fn run(cli: &Cli) -> Result<bool> {
             }
             return Ok(failed.is_empty());
         }
-        Cmd::Deploy { name, svc, opts } => {
-            let outcome = mgr.deploy(name, svc, opts.clone())?;
+        Cmd::Deploy {
+            name,
+            svc,
+            settings,
+            opts,
+        } => {
+            let mut svc = svc.clone();
+            if let Some(p) = settings {
+                svc.settings = read_settings(p)?;
+            }
+            let outcome = mgr.deploy(name, &svc, opts.clone())?;
             println!("{name}: {}", describe(&outcome));
             return Ok(success(&outcome));
         }
-        Cmd::Remove { name } => {
-            mgr.remove(name)?;
+        Cmd::Remove { name, purge } => {
+            let left = mgr.remove(name, *purge)?;
             println!("{name}: removed");
+            if !*purge {
+                for p in left {
+                    eprintln!("{name}: state left in {} (--purge deletes it)", p.display());
+                }
+            }
         }
         Cmd::Reconcile => {
             for removed in mgr.reconcile()? {
@@ -503,6 +593,38 @@ fn run(cli: &Cli) -> Result<bool> {
             let generation = mgr.rollback(name)?;
             println!("{name}: rolled back to generation {generation}");
         }
+        Cmd::Export { name, out: None } => {
+            let (meta, _, _) = mgr.export_meta(name)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&meta).expect("meta is serializable")
+            );
+        }
+        Cmd::Export {
+            name,
+            out: Some(out),
+        } => {
+            mgr.export(name, out)?;
+            if out.as_os_str() != "-" {
+                eprintln!("{name}: exported to {}", out.display());
+            }
+        }
+        Cmd::Import {
+            archive,
+            name,
+            settings,
+            opts,
+        } => {
+            let settings = settings.as_deref().map(read_settings).transpose()?;
+            let (name, outcome) = mgr.import(archive, name.as_deref(), settings, opts.clone())?;
+            match &outcome {
+                UpdateOutcome::Updated { generation } => {
+                    println!("{name}: imported as generation {generation}")
+                }
+                other => println!("{name}: {}", describe(other)),
+            }
+            return Ok(success(&outcome));
+        }
         Cmd::Lock { name } => {
             let url = mgr.lock_service(name)?;
             println!("{name}: pinned to {url}");
@@ -525,10 +647,7 @@ fn run(cli: &Cli) -> Result<bool> {
     Ok(true)
 }
 
-fn read_settings(path: Option<&Path>) -> Result<Value> {
-    let Some(path) = path else {
-        return Ok(serde_json::json!({}));
-    };
+fn read_settings(path: &Path) -> Result<Value> {
     let data =
         fs::read_to_string(path).map_err(Error::io(format!("read settings {}", path.display())))?;
     serde_json::from_str(&data).map_err(Error::json(format!("parse settings {}", path.display())))
@@ -575,6 +694,8 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
             "degraded"
         } else if s.updating {
             "updating"
+        } else if !s.failed_units.is_empty() {
+            "failed"
         } else if s.generation.is_some() {
             "ok"
         } else {
@@ -596,10 +717,25 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
             mark
         );
         if let Some(err) = s.held.as_deref().or(s.last_error.as_deref()) {
-            let mut lines = err.lines().map(str::trim);
-            let line = lines.clone().rfind(|l| l.contains("error:"));
-            let line = line.or_else(|| lines.next()).unwrap_or(err);
+            let lines: Vec<&str> = err
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            let i = lines
+                .iter()
+                .rposition(|l| l.contains("error:"))
+                .unwrap_or(0);
+            let mut line = lines.get(i).copied().unwrap_or(err).to_string();
+            if line.ends_with(':') {
+                if let Some(next) = lines.get(i + 1) {
+                    line = format!("{line} {next}");
+                }
+            }
             println!("\tlast error: {line}");
+        }
+        if !s.failed_units.is_empty() {
+            println!("\tfailed: {}", s.failed_units.join(" "));
         }
         for claim in &s.missing_providers {
             eprintln!("{}: warning: no provider announces '{claim}'", s.name);

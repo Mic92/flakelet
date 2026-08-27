@@ -28,28 +28,53 @@ pub fn unpublish(runtime_dir: &Path, name: &str) -> Result<()> {
     }
 }
 
-/// Contract claims (`exports.requires.<contract>`) without an announcement
-/// in `providers_dir`. A missing dir means unknown host, not "no providers".
+/// `/etc/flakelet/providers.d/<contract>.json`. Unknown keys are ignored.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct Provider {
+    pub contract: String,
+    #[serde(default)]
+    pub state: Option<ProviderState>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderState {
+    pub dump: std::path::PathBuf,
+    pub restore: std::path::PathBuf,
+}
+
+impl Provider {
+    /// "postgres/v1" serves the `requires.postgres` claim.
+    pub fn claim(&self) -> &str {
+        self.contract.split('/').next().unwrap_or(&self.contract)
+    }
+}
+
+/// None when the directory is missing: unknown host, not "no providers".
+pub fn providers(providers_dir: &Path) -> Option<Vec<Provider>> {
+    let entries = fs::read_dir(providers_dir).ok()?;
+    Some(
+        entries
+            .filter_map(|e| fs::read_to_string(e.ok()?.path()).ok())
+            .filter_map(|data| serde_json::from_str(&data).ok())
+            .collect(),
+    )
+}
+
+pub fn claims(exports: &Value) -> Vec<String> {
+    exports
+        .get("requires")
+        .and_then(Value::as_object)
+        .map(|r| r.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 pub fn unannounced_claims(exports: &Value, providers_dir: &Path) -> Vec<String> {
-    let Some(requires) = exports.get("requires").and_then(Value::as_object) else {
+    let Some(announced) = providers(providers_dir) else {
         return Vec::new();
     };
-    let Ok(entries) = fs::read_dir(providers_dir) else {
-        return Vec::new();
-    };
-    let announced: Vec<String> = entries
-        .filter_map(|e| fs::read_to_string(e.ok()?.path()).ok())
-        .filter_map(|data| {
-            let v: Value = serde_json::from_str(&data).ok()?;
-            // "postgres/v1" announces the "postgres" claim key.
-            let contract = v.get("contract")?.as_str()?;
-            Some(contract.split('/').next().unwrap_or(contract).to_string())
-        })
-        .collect();
-    requires
-        .keys()
-        .filter(|claim| !announced.iter().any(|a| a == *claim))
-        .cloned()
+    claims(exports)
+        .into_iter()
+        .filter(|c| !announced.iter().any(|p| p.claim() == c))
         .collect()
 }
 

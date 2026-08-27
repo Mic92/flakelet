@@ -3,8 +3,10 @@ use crate::driver::DriverEntry;
 use crate::error::{Error, Result};
 use crate::generations::{Generations, Manifest};
 use crate::state::{write_json_atomic, Hold, Origin, State};
+use crate::svcstate::StateInfo;
 use crate::systemd::Units;
-use crate::{driver, exports, lock, nix, settings, systemd};
+use crate::transfer::{self, ExportMeta};
+use crate::{driver, exports, lock, nix, settings, svcstate, systemd};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -26,6 +28,8 @@ pub struct UpdateOpts {
     /// Testing override for the flake ref. The next update without it
     /// reverts to the configured ref.
     pub flake: Option<String>,
+    /// Unpacked export archive to restore state from before activation.
+    pub restore_from: Option<PathBuf>,
 }
 
 /// Precedence: --flake override, then pin, then the configured ref.
@@ -87,7 +91,10 @@ pub struct ServiceStatus {
     pub held: Option<String>,
     pub last_error: Option<String>,
     pub updating: bool,
+    pub failed_units: Vec<String>,
     pub missing_providers: Vec<String>,
+    pub state: Option<StateInfo>,
+    pub export_blockers: Vec<String>,
 }
 
 impl ServiceStatus {
@@ -105,7 +112,10 @@ impl ServiceStatus {
             held: None,
             last_error: None,
             updating: false,
+            failed_units: Vec::new(),
             missing_providers: Vec::new(),
+            state: None,
+            export_blockers: Vec::new(),
         }
     }
 }
@@ -255,6 +265,8 @@ impl Manager {
             };
             let updating =
                 lock::acquire(&self.service_lock(&name), true, false, "status probe").is_err();
+            let export_blockers = self.export_blockers(&st, false);
+            let failed_units = systemd::failed(&st.units).unwrap_or_default();
             result.push(ServiceStatus {
                 name,
                 flake: svc.flake,
@@ -268,13 +280,37 @@ impl Manager {
                 held: st.hold.map(|h| h.reason),
                 last_error: st.last_error,
                 updating,
+                failed_units,
                 missing_providers: exports::unannounced_claims(
                     &st.exports,
                     &self.config.providers_dir,
                 ),
+                export_blockers,
+                state: st.state,
             });
         }
         Ok(result)
+    }
+
+    fn current_artifact(&self, name: &str, st: &State) -> Option<PathBuf> {
+        let gens = Generations::new(&self.config.gcroot_dir, name);
+        gens.manifest(st.generation?).ok()?.artifact
+    }
+
+    fn export_blockers(&self, st: &State, need_restore: bool) -> Vec<String> {
+        if st.generation.is_none() {
+            return vec!["never deployed".into()];
+        }
+        let mut b = svcstate::blockers(
+            st.state.as_ref(),
+            &st.exports,
+            &self.config.providers_dir,
+            need_restore,
+        );
+        if st.degraded {
+            b.push("running a degraded (cached) generation".into());
+        }
+        b
     }
 
     /// Resolve the flake refs of the given services (default: all with a
@@ -425,7 +461,8 @@ impl Manager {
     }
 
     /// Stop a service and delete its generations and state.
-    pub fn remove(&self, name: &str) -> Result<()> {
+    /// Returns the state folders that still hold data.
+    pub fn remove(&self, name: &str, purge: bool) -> Result<Vec<PathBuf>> {
         validate_name(name)?;
         if !self.service_dir(name).exists() {
             return Err(Error::NeverDeployed(name.into()));
@@ -437,7 +474,19 @@ impl Manager {
         Generations::new(&self.config.gcroot_dir, name).remove_all()?;
         fs::remove_dir_all(self.service_dir(name))
             .map_err(Error::io(format!("remove state of {name}")))?;
-        Ok(())
+        let mut left = Vec::new();
+        for f in st.state.iter().flat_map(|s| &s.folders) {
+            let real = transfer::real_path(f);
+            if purge {
+                let _ = fs::remove_dir_all(&real);
+                if f.dynamic {
+                    let _ = fs::remove_file(&f.path);
+                }
+            } else if !transfer::is_empty_dir(&real) {
+                left.push(real);
+            }
+        }
+        Ok(left)
     }
 
     /// Remove declarative services that are no longer present in the host configuration.
@@ -449,7 +498,7 @@ impl Manager {
             }
             let st = State::load(&self.state_path(&name))?;
             if st.origin == Origin::Declarative {
-                self.remove(&name)?;
+                self.remove(&name, false)?;
                 removed.push(name);
             }
         }
@@ -545,8 +594,221 @@ impl Manager {
         st.generation = Some(target);
         st.units = manifest.units;
         st.exports = manifest.exports;
+        st.state = manifest.state;
         st.save(&self.state_path(name))?;
         Ok(target)
+    }
+
+    /// Describe what `export` would write. Also the exportability check.
+    pub fn export_meta(&self, name: &str) -> Result<(ExportMeta, ServiceConfig, State)> {
+        let (svc, _) = self.service(name)?;
+        let st = State::load(&self.state_path(name))?;
+        let reasons = self.export_blockers(&st, false);
+        if !reasons.is_empty() {
+            return Err(Error::NotTransferable {
+                service: name.into(),
+                verb: "exported",
+                reasons,
+            });
+        }
+        let manifest = Generations::new(&self.config.gcroot_dir, name)
+            .manifest(st.generation.expect("blockers checked deployment"))?;
+        let meta = ExportMeta {
+            version: transfer::FORMAT_VERSION,
+            flakelet_version: env!("CARGO_PKG_VERSION").into(),
+            name: name.into(),
+            source_host: transfer::hostname(),
+            created: unix_time(),
+            flake_url: manifest.flake_url,
+            flake_rev: manifest.flake_rev,
+            settings_hash: manifest.settings_hash,
+            state: manifest.state.expect("blockers checked state.json"),
+            exports: manifest.exports,
+            consistency: "stopped".into(),
+            path_settings: transfer::path_settings(&svc.settings),
+        };
+        Ok((meta, svc, st))
+    }
+
+    /// Stop the service, collect its state into `out`, start it again.
+    pub fn export(&self, name: &str, out: &Path) -> Result<ExportMeta> {
+        let _locks = self.locks(name, true, "export")?;
+        let (meta, svc, st) = self.export_meta(name)?;
+        fs::create_dir_all(&self.config.cache_dir).map_err(Error::io("create cache dir"))?;
+        let work =
+            tempfile::tempdir_in(&self.config.cache_dir).map_err(Error::io("create export dir"))?;
+        let dir = work.path();
+        write_json_atomic(&dir.join("meta.json"), &meta)?;
+        write_json_atomic(&dir.join("service.json"), &svc)?;
+        for d in ["state", "requires"] {
+            fs::create_dir(dir.join(d)).map_err(Error::io("create export dir"))?;
+        }
+
+        eprintln!("{name}: stopping units");
+        systemd::stop_all(&st.units)?;
+        let collected = (|| {
+            if let Some(unit) = &meta.state.dump {
+                eprintln!("{name}: running {unit}");
+                if !systemd::start_oneshot(unit)? {
+                    return Err(Error::OneshotFailed {
+                        service: name.into(),
+                        unit: unit.clone(),
+                    });
+                }
+            }
+            transfer::provider_hooks(&meta.exports, &self.config.providers_dir, dir, false)?;
+            for (i, folder) in meta.state.folders.iter().enumerate() {
+                eprintln!("{name}: archiving {}", folder.path.display());
+                transfer::tar_folder(folder, &dir.join(format!("state/{i}.tar")))?;
+            }
+            Ok(())
+        })();
+        eprintln!("{name}: starting units");
+        let restarted = systemd::start_all(&st.units);
+        collected?;
+        restarted?;
+        transfer::pack(dir, out)?;
+        Ok(meta)
+    }
+
+    /// Register (if needed), build, restore state from an export archive
+    /// and activate. `settings` replaces the archived settings for a new
+    /// manual entry. An existing entry keeps its own.
+    pub fn import(
+        &self,
+        archive: &Path,
+        name: Option<&str>,
+        settings: Option<Value>,
+        mut opts: UpdateOpts,
+    ) -> Result<(String, UpdateOutcome)> {
+        fs::create_dir_all(&self.config.cache_dir).map_err(Error::io("create cache dir"))?;
+        let work =
+            tempfile::tempdir_in(&self.config.cache_dir).map_err(Error::io("create import dir"))?;
+        transfer::unpack(archive, work.path())?;
+        let meta = ExportMeta::load(work.path())?;
+        let renamed = name.is_some_and(|n| n != meta.name);
+        let name = name.unwrap_or(&meta.name).to_string();
+        validate_name(&name)?;
+        // With --name the folders derive differently, only the build can tell.
+        if !renamed {
+            self.import_precheck(&name, &meta.state, &meta.exports)?;
+        }
+
+        let fresh = self.service(&name).is_err();
+        if fresh {
+            let path = work.path().join("service.json");
+            let data = fs::read_to_string(&path).map_err(Error::io("read service.json"))?;
+            let mut svc: ServiceConfig =
+                serde_json::from_str(&data).map_err(Error::json("corrupt service.json"))?;
+            if let Some(s) = settings {
+                svc.settings = s;
+            }
+            let _locks = self.locks(&name, !opts.no_wait, "import")?;
+            write_json_atomic(&self.manual_config_path(&name), &svc)?;
+            let mut st = State::load(&self.state_path(&name))?;
+            st.pin = Some(meta.flake_url.clone());
+            st.save(&self.state_path(&name))?;
+        }
+        opts.restore_from = Some(work.path().to_path_buf());
+        opts.force = true;
+        let result = self.update(&name, opts);
+        if fresh && !matches!(result, Ok(UpdateOutcome::Updated { .. })) {
+            let _ = Generations::new(&self.config.gcroot_dir, &name).remove_all();
+            let _ = fs::remove_dir_all(self.service_dir(&name));
+        }
+        Ok((name, result?))
+    }
+
+    /// Host-side conditions for restoring `state` here.
+    fn import_precheck(&self, name: &str, state: &StateInfo, exports: &Value) -> Result<()> {
+        let mut reasons =
+            svcstate::blockers(Some(state), exports, &self.config.providers_dir, true);
+        for f in &state.folders {
+            let real = transfer::real_path(f);
+            if !transfer::is_empty_dir(&real) {
+                reasons.push(format!("{} is not empty", real.display()));
+            }
+            if !f.dynamic && !transfer::user_exists(&f.user) {
+                reasons.push(format!("user '{}' does not exist on this host", f.user));
+            }
+        }
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::NotTransferable {
+                service: name.into(),
+                verb: "imported",
+                reasons,
+            })
+        }
+    }
+
+    /// Between build and activation of an import: put the archived state in
+    /// place so the units start on top of it.
+    fn restore(&self, name: &str, artifact: &Artifact, dir: &Path) -> Result<()> {
+        let meta = ExportMeta::load(dir)?;
+        let st = State::load(&self.state_path(name))?;
+        let Some(target) = &artifact.state else {
+            return Err(Error::NotTransferable {
+                service: name.into(),
+                verb: "imported",
+                reasons: vec!["evaluation produced no state.json".into()],
+            });
+        };
+        let mut reasons = Vec::new();
+        if target.folders.len() != meta.state.folders.len()
+            || target.dump.is_some() != meta.state.dump.is_some()
+            || target.restore.is_some() != meta.state.restore.is_some()
+        {
+            reasons.push(format!(
+                "evaluated state {:?} does not match archive {:?}",
+                target.paths(),
+                meta.state.paths()
+            ));
+        }
+        if exports::claims(&artifact.exports) != exports::claims(&meta.exports) {
+            reasons.push("evaluated requires.* claims differ from archive".into());
+        }
+        if !reasons.is_empty() {
+            return Err(Error::NotTransferable {
+                service: name.into(),
+                verb: "imported",
+                reasons,
+            });
+        }
+        self.import_precheck(name, target, &artifact.exports)?;
+
+        systemd::stop_all(&st.units)?;
+        let run = || -> Result<()> {
+            for (i, folder) in target.folders.iter().enumerate() {
+                eprintln!("{name}: restoring {}", folder.path.display());
+                transfer::untar_folder(folder, &dir.join(format!("state/{i}.tar")))?;
+            }
+            transfer::provider_hooks(&artifact.exports, &self.config.providers_dir, dir, true)?;
+            if let Some(unit) = &target.restore {
+                eprintln!("{name}: running {unit}");
+                systemd::relink(&artifact.units)?;
+                if !systemd::start_oneshot(unit)? {
+                    return Err(Error::OneshotFailed {
+                        service: name.into(),
+                        unit: unit.clone(),
+                    });
+                }
+            }
+            Ok(())
+        };
+        let result = run();
+        if result.is_err() {
+            // Verified empty above, so this only drops what was just extracted.
+            for folder in &target.folders {
+                transfer::clear_dir(&transfer::real_path(folder));
+            }
+            let _ = systemd::remove(&artifact.units);
+            if !st.units.is_empty() {
+                let _ = systemd::relink(&st.units);
+            }
+        }
+        result
     }
 
     pub fn update(&self, name: &str, opts: UpdateOpts) -> Result<UpdateOutcome> {
@@ -651,9 +913,11 @@ impl Manager {
         read_contents(name, &mut artifact)?;
         self.check_conflicts(name, &artifact)?;
 
-        if artifact.units == st.units && !opts.force {
-            // Exports may change without the units changing (e.g. a metrics hint).
-            exports::publish(&self.config.runtime_dir, name, &artifact.exports)?;
+        if let Some(dir) = &opts.restore_from {
+            self.restore(name, &artifact, dir)?;
+            // restore() stopped the units. Make switch() start them again.
+            st.units.clear();
+        } else if !opts.force && self.current_artifact(name, st).as_ref() == Some(&artifact.out) {
             st.degraded = false;
             st.last_error = None;
             return Ok(UpdateOutcome::UpToDate);
@@ -735,6 +999,7 @@ impl Manager {
             driver: artifact.driver,
             artifact: Some(artifact.out.clone()),
             exports: artifact.exports.clone(),
+            state: artifact.state.clone(),
             created: unix_time(),
         };
         let generation = gens.create(&manifest, &extra_roots)?;
@@ -765,6 +1030,7 @@ impl Manager {
         st.generation = Some(generation);
         st.units = units;
         st.exports = artifact.exports;
+        st.state = artifact.state;
         st.locked_url = Some(artifact.flake_url);
         st.hold = None;
         st.degraded = false;
@@ -805,6 +1071,7 @@ struct Artifact {
     flake_roots: Vec<String>,
     units: Units,
     exports: Value,
+    state: Option<crate::svcstate::StateInfo>,
 }
 
 /// meta.json inside a service artifact; missing fields stay empty.
@@ -917,6 +1184,14 @@ fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
         Err(e) if e.kind() == ErrorKind::NotFound => Value::Null,
         Err(e) => return Err(Error::io(format!("read exports.json of {name}"))(e)),
     };
+    artifact.state = match fs::read_to_string(artifact.out.join("state.json")) {
+        Ok(data) => Some(
+            serde_json::from_str(&data)
+                .map_err(Error::json(format!("corrupt state.json of {name}")))?,
+        ),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(Error::io(format!("read state.json of {name}"))(e)),
+    };
     Ok(())
 }
 
@@ -930,7 +1205,7 @@ fn health_check_run(name: &str, units: &Units) -> Result<()> {
             unit: probe,
         });
     }
-    if let Some(unit) = systemd::any_failed(units)? {
+    if let Some(unit) = systemd::failed(units)?.into_iter().next() {
         return Err(Error::UnitFailed {
             service: name.into(),
             unit,

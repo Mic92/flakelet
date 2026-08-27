@@ -25,6 +25,8 @@ pub struct Manifest {
     /// Exports of this generation (derivations already replaced by out paths).
     #[serde(default)]
     pub exports: serde_json::Value,
+    #[serde(default)]
+    pub state: Option<crate::svcstate::StateInfo>,
     pub created: u64,
 }
 
@@ -127,6 +129,7 @@ mod tests {
             driver: "/nix/store/drv-driver.nix".into(),
             artifact: None,
             exports: serde_json::Value::Null,
+            state: None,
             created: 0,
         }
     }

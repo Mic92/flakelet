@@ -11,6 +11,6 @@ license = "MIT"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process", "system"] }
 lexopt = "0.3"
 tempfile = "3"

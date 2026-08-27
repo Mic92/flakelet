@@ -20,15 +20,12 @@ let
             impl =
               { options, pkgs, name, ... }:
               {
-                units."''${name}.service" = pkgs.writeText "''${name}.service" '''
-                  [Unit]
-                  Description=flakelet test service
-                  [Service]
-                  Environment=GREETING=''${options.greeting}
-                  ExecStart=''${pkgs.coreutils}/bin/sleep infinity
-                  [Install]
-                  WantedBy=multi-user.target
-                ''';
+                services.''${name} = {
+                  description = "flakelet test service";
+                  wantedBy = [ "multi-user.target" ];
+                  environment.GREETING = options.greeting;
+                  serviceConfig.ExecStart = "''${pkgs.coreutils}/bin/sleep infinity";
+                };
                 exports = {
                   metrics = [ { port = 9100; } ];
                   ports.web.port = options.port;

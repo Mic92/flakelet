@@ -4,6 +4,9 @@
   makeWrapper,
   nix,
   nix-eval-jobs,
+  gnutar,
+  zstd,
+  getent,
 }:
 
 rustPlatform.buildRustPackage {
@@ -23,13 +26,16 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # systemctl comes from the host systemd.
+  # systemctl and chown come from the host.
   postInstall = ''
     wrapProgram $out/bin/flakelet \
       --prefix PATH : ${
         lib.makeBinPath [
           nix
           nix-eval-jobs
+          gnutar
+          zstd
+          getent
         ]
       }
   '';

@@ -35,6 +35,10 @@ let
     (t.listOf scalar)
   ];
   strings = t.listOf t.string;
+  script = t.union [
+    t.derivation
+    t.string
+  ];
   # Exports end up in builtins.toJSON; reject unserializable values early.
   jsonValue = t.typedef' "jsonValue" (
     v:
@@ -45,9 +49,7 @@ let
     else if lib.isList v then
       lib.foldl' (acc: x: if acc != null then acc else jsonValue.verify x) null v
     else if lib.isAttrs v then
-      lib.foldl' (acc: x: if acc != null then acc else jsonValue.verify x) null (
-        lib.attrValues v
-      )
+      lib.foldl' (acc: x: if acc != null then acc else jsonValue.verify x) null (lib.attrValues v)
     else
       "in exports: value of type '${builtins.typeOf v}' is not JSON-serializable"
   );
@@ -87,24 +89,26 @@ let
       };
   argsType =
     (t.struct "module" {
-      services = t.attrsOf (unitType "service" {
-        serviceConfig = configSection;
-        environment = t.attrsOf scalar;
-        path = t.listOf (t.union [
-          t.derivation
-          t.string
-          t.path
-        ]);
-      });
+      services = t.attrsOf (
+        unitType "service" {
+          serviceConfig = configSection;
+          environment = t.attrsOf scalar;
+          path = t.listOf (
+            t.union [
+              t.derivation
+              t.string
+              t.path
+            ]
+          );
+        }
+      );
       sockets = t.attrsOf (unitType "socket" { socketConfig = configSection; });
       timers = t.attrsOf (unitType "timer" { timerConfig = configSection; });
       targets = t.attrsOf (unitType "target" { });
       paths = t.attrsOf (unitType "path" { pathConfig = configSection; });
-      units = t.attrsOf t.derivation;
-      healthCheck = t.union [
-        t.derivation
-        t.string
-      ];
+      healthCheck = script;
+      dumpScript = script;
+      restoreScript = script;
       exports = t.attrsOf jsonValue;
     }).override
       {
@@ -118,7 +122,6 @@ let
     in
     if err == null then v else fail "in module: ${err}";
 
-
   # mkValueStringDefault aborts on attrsets, so derivations (e.g. a package
   # as ExecStart) are stringified explicitly.
   toValue = v: if lib.isDerivation v then toString v else lib.generators.mkValueStringDefault { } v;
@@ -126,7 +129,11 @@ let
     listsAsDuplicateKeys = true;
     mkKeyValue = lib.generators.mkKeyValueDefault { mkValueString = toValue; } "=";
   };
-  section = header: attrs: lib.optionalString (attrs != { }) (toINI { ${header} = attrs; });
+  section =
+    header: attrs:
+    lib.optionalString (attrs != { }) (toINI {
+      ${header} = attrs;
+    });
 
   unitSection =
     def:
@@ -162,12 +169,24 @@ let
   serviceSection =
     def:
     let
-      env =
-        lib.optionalAttrs (def.path or [ ] != [ ]) { PATH = lib.makeBinPath def.path; }
-        // (def.environment or { });
+      # NixOS' baseline, so ported scripts keep working.
+      path = (def.path or [ ]) ++ [
+        pkgs.coreutils
+        pkgs.findutils
+        pkgs.gnugrep
+        pkgs.gnused
+        pkgs.systemdMinimal
+      ];
+      env = {
+        PATH = "${lib.makeBinPath path}:${lib.makeSearchPathOutput "bin" "sbin" path}";
+      }
+      // (def.environment or { });
     in
     section "Service" (
-      (def.serviceConfig or { })
+      # exec instead of systemd's simple: a missing binary or User= then
+      # fails the start job and with it the deploy.
+      { Type = "exec"; }
+      // (def.serviceConfig or { })
       // lib.optionalAttrs (env != { }) {
         # toJSON escapes quotes and backslashes in values.
         Environment = lib.mapAttrsToList (k: v: builtins.toJSON "${k}=${toValue v}") env;
@@ -176,6 +195,16 @@ let
   adiosTypes = import "${adios}/adios/types.nix" { korora = t; };
 
   fail = msg: throw "flakelet ${name}: ${msg}";
+  isTrue =
+    v:
+    lib.elem v [
+      true
+      "yes"
+      "true"
+      "on"
+      "1"
+      1
+    ];
 in
 rec {
   types = t;
@@ -213,7 +242,9 @@ rec {
           fail "missing required setting '${n}'";
     in
     if unknown != [ ] then
-      fail "unknown setting(s) ${lib.concatStringsSep ", " unknown}; known: ${lib.concatStringsSep ", " (lib.attrNames options)}"
+      fail "unknown setting(s) ${lib.concatStringsSep ", " unknown}; the module declares ${
+        if options == { } then "none" else lib.concatStringsSep ", " (lib.attrNames options)
+      }"
     else
       lib.mapAttrs (n: decl: value n (checkDecl n decl)) options;
 
@@ -233,54 +264,145 @@ rec {
     if m ? inputs then
       fail "module inputs are not supported; pkgs, name and helpers are injected into impl"
     else
-      render (m.impl {
+      let
         options = evalOptions (m.options or { }) settings;
-        inherit
-          pkgs
-          name
-          contracts
-          storePath
-          extraModules
-          ;
-      });
+      in
+      # impl may never touch options, the settings must still be checked.
+      builtins.deepSeq options render (
+        m.impl {
+          inherit options;
+          inherit
+            pkgs
+            name
+            contracts
+            storePath
+            extraModules
+            ;
+        }
+      );
 
   # Validate the attrset impl returns and render it into unit files.
   render =
     args:
     let
       a = check argsType args;
-      # Sugar for the `<name>-health.service` probe contract; define
-      # services.health directly for full control.
+      main = a.services.${name}.serviceConfig or { };
+      # dump/restore run as the main unit's user. systemd keys dynamic users
+      # by name, so an explicit User= yields the same uid.
+      identity =
+        lib.optionalAttrs (isTrue (main.DynamicUser or false)) { User = name; }
+        // builtins.intersectAttrs {
+          User = 1;
+          Group = 1;
+          DynamicUser = 1;
+          StateDirectory = 1;
+        } main;
+      sugar =
+        key: opt: serviceConfig:
+        if !(a ? ${opt}) then
+          { }
+        else if a ? services.${key} then
+          fail "${opt} and services.${key} are mutually exclusive"
+        else if serviceConfig == identity && !(main ? StateDirectory) then
+          fail "${opt} needs services.${name} with a StateDirectory= to read and write"
+        else
+          {
+            ${key} = {
+              description = "${key} for ${name}";
+              serviceConfig = {
+                Type = "oneshot";
+                ExecStart = a.${opt};
+              }
+              // serviceConfig;
+            };
+          };
       services =
         (a.services or { })
-        // lib.optionalAttrs (a ? healthCheck) {
-          health =
-            if a ? services.health then
-              fail "healthCheck and services.health are mutually exclusive"
-            else
-              {
-                description = "health probe for ${name}";
-                serviceConfig = {
-                  Type = "oneshot";
-                  ExecStart = a.healthCheck;
-                  DynamicUser = true;
-                  TimeoutStartSec = "1min";
-                };
-              };
-        };
+        // sugar "health" "healthCheck" {
+          DynamicUser = true;
+          TimeoutStartSec = "1min";
+        }
+        // sugar "dump" "dumpScript" identity
+        // sugar "restore" "restoreScript" identity;
       units =
         renderGroup ".service" serviceSection services
         // renderGroup ".socket" (def: section "Socket" (def.socketConfig or { })) (a.sockets or { })
         // renderGroup ".timer" (def: section "Timer" (def.timerConfig or { })) (a.timers or { })
         // renderGroup ".target" (_: "") (a.targets or { })
-        // renderGroup ".path" (def: section "Path" (def.pathConfig or { })) (a.paths or { })
-        # Raw escape hatch: pre-rendered unit files win over typed ones.
-        // (a.units or { });
+        // renderGroup ".path" (def: section "Path" (def.pathConfig or { })) (a.paths or { });
     in
     if units == { } then
       fail "no units defined"
     else
-      { inherit units; } // lib.optionalAttrs (a ? exports) { inherit (a) exports; };
+      {
+        inherit units;
+        state = deriveState services (a.exports.state or { });
+      }
+      // lib.optionalAttrs (a ? exports) { inherit (a) exports; };
+
+  deriveState =
+    services: declared:
+    let
+      d = check ((t.struct "exports.state" { extraFolders = t.listOf t.string; }).override {
+        total = false;
+        unknown = false;
+      }) declared;
+      extraFolders = d.extraFolders or [ ];
+      words =
+        v:
+        if lib.isList v then
+          lib.concatMap words v
+        else
+          lib.filter (s: s != "") (lib.splitString " " (toString v));
+      owner = sc: rec {
+        dynamic = isTrue (sc.DynamicUser or false);
+        user = sc.User or (if dynamic then name else "root");
+        # null: the user's login group, resolved by chown on the target.
+        group = sc.Group or null;
+      };
+      fromUnit =
+        key:
+        let
+          sc = services.${key}.serviceConfig or { };
+        in
+        # StateDirectory=a:b makes b a symlink to a. Only a holds data.
+        map (dir: owner sc // { path = "/var/lib/${lib.head (lib.splitString ":" dir)}"; }) (
+          words (sc.StateDirectory or [ ])
+        );
+      main = services.${name}.serviceConfig or { };
+      # Main unit first so a StateDirectory shared with a helper unit is
+      # attributed to it. listToAttrs keeps the first occurrence per path.
+      keys =
+        lib.optional (services ? ${name}) name
+        ++ lib.attrNames (
+          removeAttrs services [
+            name
+            "dump"
+            "restore"
+            "health"
+          ]
+        );
+      folders =
+        lib.concatMap fromUnit keys
+        ++ map (
+          path:
+          owner main
+          // {
+            inherit path;
+            dynamic = false;
+          }
+        ) extraFolders;
+    in
+    if lib.any (p: !(lib.hasPrefix "/" p) || lib.hasPrefix builtins.storeDir p) extraFolders then
+      fail "exports.state.extraFolders must be absolute non-store paths"
+    else if extraFolders != [ ] && (owner main).dynamic then
+      fail "exports.state.extraFolders needs a static User= on services.${name}"
+    else
+      {
+        folders = lib.attrValues (lib.listToAttrs (map (f: lib.nameValuePair f.path f) folders));
+        dump = if services ? dump then "${name}-dump.service" else null;
+        restore = if services ? restore then "${name}-restore.service" else null;
+      };
 
   # Blessed contract constructors; the JSON shape is the interface
   # (contracts/*.json), these only check it at evaluation time.

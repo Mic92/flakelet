@@ -174,6 +174,9 @@ impl Nix {
             let job: EvalJob =
                 serde_json::from_str(line).map_err(Error::json("parse nix-eval-jobs output"))?;
             if let Some(message) = job.error {
+                let message = strip_eval_trace(&message);
+                let own = format!("flakelet {}: ", job.attr);
+                let message = message.strip_prefix(&own).unwrap_or(&message).to_string();
                 return Err(Error::Eval {
                     attr: job.attr,
                     message,
@@ -273,6 +276,20 @@ fn default_max_memory_mb() -> u64 {
 }
 
 /// `nix flake archive --json` output: nested { path, inputs: { <name>: ... } }.
+/// The trace above the last `error:` paragraph is the driver's
+/// derivationStrict boilerplate. The position of a throw is below it.
+fn strip_eval_trace(message: &str) -> String {
+    let trimmed = message.trim();
+    match trimmed.rfind("\n\n") {
+        Some(i) if trimmed[i..].trim_start().starts_with("error:") => trimmed[i..]
+            .trim_start()
+            .trim_start_matches("error:")
+            .trim()
+            .to_string(),
+        _ => trimmed.trim_start_matches("error:").trim().to_string(),
+    }
+}
+
 fn collect_archive_paths(value: &Value, out: &mut Vec<String>) {
     let Some(obj) = value.as_object() else { return };
     if let Some(path) = obj.get("path").and_then(|p| p.as_str()) {
@@ -322,6 +339,16 @@ struct LockedNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eval_trace_is_stripped() {
+        let msg = "error:\n       … while calling the 'derivationStrict' builtin\n\n       (stack trace truncated; use '--show-trace')\n\n       error: cannot add a string\n       at /nix/store/x/flake.nix:1:2:\n";
+        assert_eq!(
+            strip_eval_trace(msg),
+            "cannot add a string\n       at /nix/store/x/flake.nix:1:2:"
+        );
+        assert_eq!(strip_eval_trace("error: plain"), "plain");
+    }
 
     #[test]
     fn credential_paths_with_shell_metacharacters_are_rejected() {

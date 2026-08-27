@@ -29,6 +29,7 @@ pub struct State {
     pub units: Units,
     /// Exports of the active generation (also published under runtime_dir).
     pub exports: Value,
+    pub state: Option<crate::svcstate::StateInfo>,
     /// Locked flake URL of the last successful update.
     pub locked_url: Option<String>,
     /// Pinned flake URL set by `flakelet lock`.
@@ -50,6 +51,7 @@ impl Default for State {
             generation: None,
             units: Units::new(),
             exports: Value::Null,
+            state: None,
             locked_url: None,
             pin: None,
             override_flake: None,
