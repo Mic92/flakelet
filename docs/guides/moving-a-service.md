@@ -83,7 +83,7 @@ on the target host ([why](../design.md#users-and-state-ownership)).
 
 - *state folder not empty*: import refuses to overwrite. `flakelet remove
   --purge web` on the target clears a previous attempt.
-- *build fails on the target*: nothing was extracted yet; a freshly
+- *build fails on the target*: nothing was extracted yet. A freshly
   registered manual entry is removed again.
 - *health probe fails after restore*: normal rollback rules apply, the
   service is put on hold and `flakelet status` shows why.

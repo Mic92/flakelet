@@ -10,7 +10,7 @@ flakelets.<attr> = { types, ... }: { options = { … }; impl = { … }: { … };
 
 The host selects `<attr>` with `output` (default `flakelets.default`). The
 value may also be an attrset of such functions. The flake must not rely on
-its own `inputs`; adios' `inputs`/`defaultFunc` wiring is not supported.
+its own `inputs`. Adios' `inputs`/`defaultFunc` wiring is not supported.
 
 ### Outer function arguments
 
@@ -37,7 +37,7 @@ and missing options without `default` abort the update.
 
 ## `impl` return value
 
-All keys optional; unknown keys are errors. At least one unit must result.
+All keys optional. Unknown keys are errors. At least one unit must result.
 
 | key             | type                                  |
 | --------------- | ------------------------------------- |
@@ -95,10 +95,10 @@ exclusive with defining the corresponding `services.<key>` yourself.
 ## Activation semantics
 
 - Units with an `[Install]` section are enabled and (re)started.
-- Units without one are only `try-restart`ed if running; otherwise left to
+- Units without one are only `try-restart`ed if running. Otherwise left to
   socket/timer/dependency activation.
 - Units that disappeared are stopped and unlinked before new ones start.
-- After switching, `<name>-health.service` is started if present; a failed
+- After switching, `<name>-health.service` is started if present. A failed
   start job, or any unit of the entry in `failed` state, rolls back.
 - `<name>-dump.service` / `<name>-restore.service` are never started by
   activation, only by `export` / `import`.

@@ -1,7 +1,7 @@
 # CLI reference
 
 `flakelet [--config <file>] <command> [options]`. Default config is
-`/etc/flakelet/config.json`. Mutating commands need root; `check`, `build`,
+`/etc/flakelet/config.json`. Mutating commands need root. `check`, `build`,
 `driver`, `status`, `diff` do not. `flakelet <command> --help` prints the
 same information with examples.
 
