@@ -9,9 +9,13 @@ let
   cfg = config.services.flakelets;
   flakelet = lib.getExe cfg.package;
   updateService = args: {
-    wants = [ "network-online.target" ];
+    wants = [
+      "network-online.target"
+      "flakelet-providers.target"
+    ];
     after = [
       "network-online.target"
+      "flakelet-providers.target"
       "flakelet-reconcile.service"
     ];
     serviceConfig = {
@@ -52,6 +56,12 @@ in
     systemd.targets.flakelet = {
       description = "flakelet managed services";
       wantedBy = [ "multi-user.target" ];
+    };
+
+    # Providers order their backing service before this so `provision`
+    # hooks can run when updates start at boot.
+    systemd.targets.flakelet-providers = {
+      description = "flakelet contract providers ready";
     };
 
     systemd.services = {
