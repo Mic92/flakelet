@@ -671,6 +671,8 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
             "degraded"
         } else if s.updating {
             "updating"
+        } else if !s.failed_units.is_empty() {
+            "failed"
         } else if s.generation.is_some() {
             "ok"
         } else {
@@ -696,6 +698,9 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
             let line = lines.clone().rfind(|l| l.contains("error:"));
             let line = line.or_else(|| lines.next()).unwrap_or(err);
             println!("\tlast error: {line}");
+        }
+        if !s.failed_units.is_empty() {
+            println!("\tfailed: {}", s.failed_units.join(" "));
         }
         for claim in &s.missing_providers {
             eprintln!("{}: warning: no provider announces '{claim}'", s.name);

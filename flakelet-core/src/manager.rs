@@ -91,8 +91,9 @@ pub struct ServiceStatus {
     pub held: Option<String>,
     pub last_error: Option<String>,
     pub updating: bool,
+    pub failed_units: Vec<String>,
     pub missing_providers: Vec<String>,
-    pub state: Option<crate::svcstate::StateInfo>,
+    pub state: Option<StateInfo>,
     pub export_blockers: Vec<String>,
 }
 
@@ -111,6 +112,7 @@ impl ServiceStatus {
             held: None,
             last_error: None,
             updating: false,
+            failed_units: Vec::new(),
             missing_providers: Vec::new(),
             state: None,
             export_blockers: Vec::new(),
@@ -264,6 +266,7 @@ impl Manager {
             let updating =
                 lock::acquire(&self.service_lock(&name), true, false, "status probe").is_err();
             let export_blockers = self.export_blockers(&st, false);
+            let failed_units = systemd::failed(&st.units).unwrap_or_default();
             result.push(ServiceStatus {
                 name,
                 flake: svc.flake,
@@ -277,6 +280,7 @@ impl Manager {
                 held: st.hold.map(|h| h.reason),
                 last_error: st.last_error,
                 updating,
+                failed_units,
                 missing_providers: exports::unannounced_claims(
                     &st.exports,
                     &self.config.providers_dir,
@@ -1169,7 +1173,7 @@ fn health_check_run(name: &str, units: &Units) -> Result<()> {
             unit: probe,
         });
     }
-    if let Some(unit) = systemd::any_failed(units)? {
+    if let Some(unit) = systemd::failed(units)?.into_iter().next() {
         return Err(Error::UnitFailed {
             service: name.into(),
             unit,

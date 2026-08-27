@@ -125,22 +125,28 @@ pub fn start_oneshot(unit: &str) -> Result<bool> {
     Ok(status.success())
 }
 
-/// First unit of the service that is in failed state, if any.
-pub fn any_failed(units: &Units) -> Result<Option<String>> {
-    for unit in units.keys() {
-        // `is-failed --quiet` exits 0 iff the unit is failed.
-        let status = Command::new("systemctl")
-            .args(["is-failed", "--quiet", unit])
-            .status()
-            .map_err(|source| Error::Spawn {
-                program: "systemctl".into(),
-                source,
-            })?;
-        if status.success() {
-            return Ok(Some(unit.clone()));
-        }
+/// Units of the service that are in failed state.
+pub fn failed(units: &Units) -> Result<Vec<String>> {
+    if units.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(None)
+    let out = Command::new("systemctl")
+        .args(["show", "--property=ActiveState", "--value"])
+        .args(units.keys())
+        .output()
+        .map_err(|source| Error::Spawn {
+            program: "systemctl".into(),
+            source,
+        })?;
+    // One value per unit in argument order, separated by blank lines.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let states = text.lines().filter(|l| !l.is_empty());
+    Ok(units
+        .keys()
+        .zip(states)
+        .filter(|(_, s)| *s == "failed")
+        .map(|(u, _)| u.clone())
+        .collect())
 }
 
 fn link(unit: &str, target: &PathBuf) -> Result<()> {
