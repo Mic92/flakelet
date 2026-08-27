@@ -513,7 +513,7 @@ flakelet build [--machine <m> | --config <file>] <name>…
 flakelet driver [--machine <m>] [<name>…]
 flakelet deploy <name> --flake <ref> [--settings <file>] […]
 flakelet activate <name> <store path>
-flakelet remove <name>
+flakelet remove [--purge] <name>
 flakelet reconcile
 flakelet status [--json]
 flakelet rollback <name>

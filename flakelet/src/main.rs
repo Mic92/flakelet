@@ -22,7 +22,7 @@ Commands:
                         Register and deploy a service outside the host configuration
   activate <name> <store path>
                         Register and start a prebuilt service artifact (no evaluation)
-  remove <name>         Stop a service and delete its state and generations
+  remove <name>         Stop a service and delete its generations
   reconcile             Remove declarative services that vanished from the host configuration
   check [<name>...] [--build] [--gc-roots-dir <dir>] [--machine <name> [--flake <ref>]]
                         Resolve and evaluate configured services without touching state (CI)
@@ -109,9 +109,11 @@ Example:
   flakelet activate web /nix/store/...-flakelet-web
 ",
         "remove" => "\
-Usage: flakelet remove <name>
+Usage: flakelet remove [--purge] <name>
 
-Stop a service and delete its state and generations.
+Stop a service, unlink its units and delete its generations and flakelet
+bookkeeping. The service's own state folders (StateDirectory=) are kept
+and listed. --purge empties them too.
 
 Example:
   flakelet remove web
@@ -242,6 +244,7 @@ enum Cmd {
     },
     Remove {
         name: String,
+        purge: bool,
     },
     Reconcile,
     Check {
@@ -349,6 +352,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut machine = None;
     let mut out = None;
     let mut dry_run = false;
+    let mut purge = false;
     let mut name_opt = None;
     while let Some(arg) = parser.next()? {
         match arg {
@@ -371,6 +375,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("keep") => keep = Some(parser.value()?.parse()?),
             Short('o') | Long("output-file") => out = Some(PathBuf::from(parser.value()?)),
             Long("dry-run") => dry_run = true,
+            Long("purge") => purge = true,
             Long("name") => name_opt = Some(parser.value()?.string()?),
             Value(v) => names.push(v.string()?),
             _ => return Err(arg.unexpected()),
@@ -417,6 +422,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
         },
         "remove" => Cmd::Remove {
             name: one_name(&names)?,
+            purge,
         },
         "reconcile" => Cmd::Reconcile,
         "check" => {
@@ -538,9 +544,14 @@ fn run(cli: &Cli) -> Result<bool> {
             println!("{name}: {}", describe(&outcome));
             return Ok(success(&outcome));
         }
-        Cmd::Remove { name } => {
-            mgr.remove(name)?;
+        Cmd::Remove { name, purge } => {
+            let left = mgr.remove(name, *purge)?;
             println!("{name}: removed");
+            if !*purge {
+                for p in left {
+                    eprintln!("{name}: state left in {} (--purge deletes it)", p.display());
+                }
+            }
         }
         Cmd::Reconcile => {
             for removed in mgr.reconcile()? {

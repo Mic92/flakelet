@@ -461,7 +461,8 @@ impl Manager {
     }
 
     /// Stop a service and delete its generations and state.
-    pub fn remove(&self, name: &str) -> Result<()> {
+    /// Returns the state folders that still hold data.
+    pub fn remove(&self, name: &str, purge: bool) -> Result<Vec<PathBuf>> {
         validate_name(name)?;
         if !self.service_dir(name).exists() {
             return Err(Error::NeverDeployed(name.into()));
@@ -473,7 +474,19 @@ impl Manager {
         Generations::new(&self.config.gcroot_dir, name).remove_all()?;
         fs::remove_dir_all(self.service_dir(name))
             .map_err(Error::io(format!("remove state of {name}")))?;
-        Ok(())
+        let mut left = Vec::new();
+        for f in st.state.iter().flat_map(|s| &s.folders) {
+            let real = transfer::real_path(f);
+            if purge {
+                let _ = fs::remove_dir_all(&real);
+                if f.dynamic {
+                    let _ = fs::remove_file(&f.path);
+                }
+            } else if !transfer::is_empty_dir(&real) {
+                left.push(real);
+            }
+        }
+        Ok(left)
     }
 
     /// Remove declarative services that are no longer present in the host configuration.
@@ -485,7 +498,7 @@ impl Manager {
             }
             let st = State::load(&self.state_path(&name))?;
             if st.origin == Origin::Declarative {
-                self.remove(&name)?;
+                self.remove(&name, false)?;
                 removed.push(name);
             }
         }

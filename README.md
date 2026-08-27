@@ -110,7 +110,7 @@ flakelet diff <name>             closure diff: running generation vs. fresh eval
 flakelet rollback <name>         previous generation
 flakelet export <name> [-o f]    stop, archive state to stdout, start again
 flakelet import <f>|- [--name n] restore an export here and start it
-flakelet remove <name>           stop a service, delete state and generations
+flakelet remove [--purge] <name> stop a service; --purge also empties its state folders
 flakelet reconcile               remove services dropped from the host config
 flakelet lock/unlock <name>      pin to the currently resolved revision
 flakelet deploy <name> --flake <ref> --settings s.json    imperative service
