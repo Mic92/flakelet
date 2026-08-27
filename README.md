@@ -111,17 +111,17 @@ impl = { options, pkgs, name, ... }: {
 };
 ```
 
-`healthCheck` expands to a oneshot with `DynamicUser=` and
+`healthCheck` expands to a oneshot that runs as the main unit's user with
 `TimeoutStartSec=1min`. That is not always enough. The probe may need
-credentials, a specific user or a longer timeout. In that case write
-`services.health` yourself:
+credentials or a longer timeout. In that case write `services.health`
+yourself:
 
 ```nix
 services.health = {
   serviceConfig = {
     Type = "oneshot";
-    ExecStart = "${pkgs.myservice}/bin/selftest --socket /run/${name}/api.sock";
-    User = name;
+    ExecStart = "${pkgs.myservice}/bin/selftest";
+    DynamicUser = true;
     TimeoutStartSec = "5min";
     LoadCredential = "token:/run/secrets/${name}-token";
   };

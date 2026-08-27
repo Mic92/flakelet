@@ -249,6 +249,19 @@ assert fails (
     dumpScript = "z";
   }
 );
+# dumpScript has nothing to read without a StateDirectory=; a health probe
+# does not need one.
+assert fails (
+  flakeletLib.render {
+    services.web.serviceConfig.ExecStart = "x";
+    dumpScript = "z";
+  }
+);
+assert
+  (flakeletLib.render {
+    services.web.serviceConfig.ExecStart = "x";
+    healthCheck = "z";
+  }) ? units."web-health.service";
 assert result.exports.ports.http.port == 8080;
 assert
   lib.attrNames result.units == [
@@ -279,8 +292,14 @@ runCommand "flakelet-lib-test" { units = linkFarm "flakelet-lib-test-units" resu
   grep -qx 'ExecStart=/bin/false worker' $units/web-worker.service
   grep -qx 'Description=setup done' $units/web-pre.target
   grep -qx 'PathChanged=/var/lib/web' $units/web-watch.path
-  grep -qx 'ExecStart=/bin/probe' $units/web-health.service
-  grep -qx 'Type=oneshot' $units/web-health.service
+  h=$units/web-health.service
+  grep -qx 'ExecStart=/bin/probe' $h
+  grep -qx 'Type=oneshot' $h
+  grep -qx 'TimeoutStartSec=1min' $h
+  # probe runs as the main unit's user so it can reach 0660 sockets/state
+  grep -qx 'User=web' $h
+  grep -qx 'DynamicUser=true' $h
+  grep -qx 'StateDirectory=web web/sub alias:link' $h
   d=$units/web-dump.service
   grep -qx 'ExecStart=/bin/dump' $d
   grep -qx 'Type=oneshot' $d
