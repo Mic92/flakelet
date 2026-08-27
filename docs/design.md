@@ -611,7 +611,7 @@ the next one.
   service.
 - `flakelet check --override-ref` to pin revisions in pull-request CI.
 - A backup adapter on top of the export steps, for clan borgbackup and
-  localbackup, and `state.{dump,restore}` in `flakelet-postgres`.
+  localbackup.
 - Firewall and metrics consumers for `exports.ports` / `exports.metrics`.
 - Automatic port allocation: a service asks for one tcp port, flakelet
   assigns it from a range and feeds it back through settings.
