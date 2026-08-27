@@ -78,55 +78,57 @@ Supports export/import.
 
 ## Writing a provider
 
-A provider announces itself with one file in `/etc/flakelet/providers.d/`.
-The file name does not matter. Unknown keys are ignored.
+A provider handles one kind of `requires.*` claim on a host. It announces
+that with a file in `/etc/flakelet/providers.d/` (any name):
+
+```json
+{ "contract": "postgres/v1" }
+```
+
+From then on `flakelet check` and `flakelet status` stop warning about
+`requires.postgres` claims on this host. One provider per contract per
+host. Unknown keys in the file are ignored.
+
+How the provider fulfils claims is up to it. Stateless ones (a vhost per
+`http.*` export) watch `/run/flakelet/exports/` and re-render from the
+whole directory whenever it changes. Providers that create something
+persistent add hooks to the announcement. flakelet runs a hook as root,
+once per service with a matching claim, and passes the claim as a JSON
+file. There is no channel back to the service: everything it needs must
+follow from the claim it wrote.
+
+### `provision`
+
+```json
+{ "contract": "postgres/v1", "provision": "/nix/store/…/bin/provision" }
+```
+
+Called as `<exe> <claim.json>` during `update`/`activate`, before any unit
+is switched. A non-zero exit fails the update. It must be idempotent and
+add-only: nothing is dropped on `remove` or rollback, the provider lists
+orphans and a human deletes them. On NixOS, order the backing service
+before `flakelet-providers.target` so updates at boot can reach it.
+Extend host services only through append-safe merge points (nginx
+`include`, SQL) so an existing `services.postgresql` keeps working.
+
+### `state.dump` / `state.restore`
 
 ```json
 {
   "contract": "postgres/v1",
-  "provision": "/nix/store/…/bin/provision",
-  "state": {
-    "dump": "/nix/store/…/bin/dump",
-    "restore": "/nix/store/…/bin/restore"
-  }
+  "provision": "…",
+  "state": { "dump": "/nix/store/…/bin/dump", "restore": "/nix/store/…/bin/restore" }
 }
 ```
 
-`contract` is the only required key. It tells flakelet that claims under
-`requires.postgres` are handled on this host. `flakelet check` and
-`flakelet status` warn when a service claims something nobody handles.
-
-The other keys are hooks. flakelet runs each hook as root, once for every
-service that has a matching `requires.*` claim, and passes that claim as a
-JSON file:
-
-| hook            | called as                  | when                                     |
-| --------------- | -------------------------- | ---------------------------------------- |
-| `provision`     | `<exe> <claim.json>`       | `update`/`activate`, before units switch |
-| `state.dump`    | `<exe> <claim.json> <dir>` | `export`, while the service is stopped   |
-| `state.restore` | `<exe> <claim.json> <dir>` | `import`, before the first activation    |
-
-Rules:
-
-- One provider per contract per host.
-- `provision` is idempotent and add-only. A non-zero exit fails the update
-  before any unit is touched. On NixOS, order the backing service before
-  `flakelet-providers.target` so updates at boot can reach it.
-- Nothing is dropped on `remove`. A rollback must find its database. The
-  provider lists orphans and a human deletes them.
-- Stateless renderings such as vhosts are the exception. They watch
-  `/run/flakelet/exports` and reconcile from the whole directory, which is
-  why `remove` deletes the exports file.
-- There is no feedback channel to the service. Everything the service
-  needs follows from the claim, so it bakes those values into its units at
-  eval time.
-- `restore` creates the resource if absent and refuses a non-empty one.
-  With `FLAKELET_REPLACE=1` in the environment (`import --replace`) it may
-  drop and recreate it instead.
-  Without `state` hooks the provider's consumers are not exportable.
-- Providers extend host services only through append-safe merge points
-  (nginx `include`, SQL) and coexist with an existing
-  `services.nginx`/`services.postgresql`.
+Optional. They make the provider's resource part of
+[`flakelet export`/`import`](../guides/moving-a-service.md); without them
+services with this claim cannot be exported. Both are called as
+`<exe> <claim.json> <dir>`: `dump` writes the resource into `<dir>` while
+the service is stopped, `restore` reads it back on the target before the
+first activation. `restore` creates the resource if absent and refuses a
+non-empty one, unless `FLAKELET_REPLACE=1` is set (`import --replace`),
+in which case it may drop and recreate it.
 
 A new field earns a place in a schema once an implementation and a real
 consumer exist. Recurring `extra.<impl>` keys are the signal to promote
