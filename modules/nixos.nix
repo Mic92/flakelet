@@ -69,20 +69,24 @@ in
       lib.nameValuePair "flakelet-${name}" {
         description = "Update flakelet service ${name}";
         wantedBy = [ "multi-user.target" ];
-        wants = [
-          "network-online.target"
-          "flakelet-providers.target"
-        ];
+        wants = [ "flakelet-providers.target" ];
         after = [
-          "network-online.target"
+          "network.target"
           "flakelet-providers.target"
           "flakelet-reconcile.service"
         ];
+        # A first deploy while offline exits EX_TEMPFAIL; retry with backoff
+        # instead of blocking boot on network-online.target.
+        startLimitIntervalSec = 0;
         before = [ "flakelet.target" ];
         # Restart (and thereby update) when the service definition changes.
         restartTriggers = [ (builtins.hashString "sha256" (builtins.toJSON svc)) ];
         serviceConfig = {
           Type = "oneshot";
+          RestartForceExitStatus = 75;
+          RestartSec = "10s";
+          RestartSteps = 5;
+          RestartMaxDelaySec = "5min";
           Nice = 10;
           IOSchedulingClass = "idle";
           MemoryHigh = "75%";

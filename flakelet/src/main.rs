@@ -318,10 +318,17 @@ fn main() -> ExitCode {
         Ok(false) => ExitCode::FAILURE,
         Err(err) => {
             eprintln!("error: {err}");
-            ExitCode::FAILURE
+            if err.is_network_error() {
+                ExitCode::from(EX_TEMPFAIL)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
+
+/// sysexits.h; lets service managers retry only transient failures.
+const EX_TEMPFAIL: u8 = 75;
 
 /// Ok(None) means: help was requested and printed.
 fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
