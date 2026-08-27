@@ -203,9 +203,9 @@ assert
           dynamic = true;
         })
         [
-          "/var/lib/alias"
           "/var/lib/web"
           "/var/lib/web/sub"
+          "/var/lib/alias"
         ];
     dump = "web-dump.service";
     restore = null;
@@ -220,8 +220,8 @@ assert
       dynamic = false;
     })
     [
-      "/srv/media"
       "/var/lib/web"
+      "/srv/media"
     ];
 assert static.state.restore == "web-restore.service";
 assert fails

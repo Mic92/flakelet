@@ -403,7 +403,10 @@ rec {
       fail "exports.state.extraFolders needs a static User= on services.${name}"
     else
       {
-        folders = lib.attrValues (lib.listToAttrs (map (f: lib.nameValuePair f.path f) folders));
+        # First claim per path wins, order kept: the archive is positional.
+        folders = lib.foldl' (
+          acc: f: if lib.any (g: g.path == f.path) acc then acc else acc ++ [ f ]
+        ) [ ] folders;
         dump = if services ? dump then "${name}-dump.service" else null;
         restore = if services ? restore then "${name}-restore.service" else null;
       };
