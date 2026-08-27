@@ -240,6 +240,7 @@ enum Cmd {
     Deploy {
         name: String,
         svc: Box<ServiceConfig>,
+        settings: Option<PathBuf>,
         opts: UpdateOpts,
     },
     Remove {
@@ -273,7 +274,7 @@ enum Cmd {
     Import {
         archive: PathBuf,
         name: Option<String>,
-        settings: Option<Value>,
+        settings: Option<PathBuf>,
         opts: UpdateOpts,
     },
     Lock {
@@ -403,10 +404,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             name: one_name(&names)?,
             svc: Box::new(ServiceConfig {
                 flake: flake.clone().ok_or("deploy requires --flake")?,
-                settings: read_settings(settings.as_deref()).map_err(|e| e.to_string())?,
                 output: output.unwrap_or_else(|| ServiceConfig::default().output),
                 ..Default::default()
             }),
+            settings,
             opts,
         },
         "activate" => match &names[..] {
@@ -416,6 +417,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
                     prebuilt: Some(path.into()),
                     ..Default::default()
                 }),
+                settings: None,
                 opts,
             },
             _ => return Err("activate expects <name> <store path>".into()),
@@ -464,10 +466,7 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
                 .map_err(|_| "expected one archive path")?
                 .into(),
             name: name_opt,
-            settings: match settings.as_deref() {
-                Some(p) => Some(read_settings(Some(p)).map_err(|e| e.to_string())?),
-                None => None,
-            },
+            settings,
             opts,
         },
         "lock" => Cmd::Lock {
@@ -539,8 +538,17 @@ fn run(cli: &Cli) -> Result<bool> {
             }
             return Ok(failed.is_empty());
         }
-        Cmd::Deploy { name, svc, opts } => {
-            let outcome = mgr.deploy(name, svc, opts.clone())?;
+        Cmd::Deploy {
+            name,
+            svc,
+            settings,
+            opts,
+        } => {
+            let mut svc = svc.clone();
+            if let Some(p) = settings {
+                svc.settings = read_settings(p)?;
+            }
+            let outcome = mgr.deploy(name, &svc, opts.clone())?;
             println!("{name}: {}", describe(&outcome));
             return Ok(success(&outcome));
         }
@@ -607,8 +615,8 @@ fn run(cli: &Cli) -> Result<bool> {
             settings,
             opts,
         } => {
-            let (name, outcome) =
-                mgr.import(archive, name.as_deref(), settings.clone(), opts.clone())?;
+            let settings = settings.as_deref().map(read_settings).transpose()?;
+            let (name, outcome) = mgr.import(archive, name.as_deref(), settings, opts.clone())?;
             match &outcome {
                 UpdateOutcome::Updated { generation } => {
                     println!("{name}: imported as generation {generation}")
@@ -639,10 +647,7 @@ fn run(cli: &Cli) -> Result<bool> {
     Ok(true)
 }
 
-fn read_settings(path: Option<&Path>) -> Result<Value> {
-    let Some(path) = path else {
-        return Ok(serde_json::json!({}));
-    };
+fn read_settings(path: &Path) -> Result<Value> {
     let data =
         fs::read_to_string(path).map_err(Error::io(format!("read settings {}", path.display())))?;
     serde_json::from_str(&data).map_err(Error::json(format!("parse settings {}", path.display())))
