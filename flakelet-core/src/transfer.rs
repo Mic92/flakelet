@@ -92,6 +92,21 @@ pub fn is_empty_dir(path: &Path) -> bool {
     }
 }
 
+/// Keeps the directory itself: for DynamicUser= it belongs to systemd.
+pub fn clear_dir(path: &Path) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let _ = if e.file_type().is_ok_and(|t| t.is_dir()) {
+            fs::remove_dir_all(&p)
+        } else {
+            fs::remove_file(&p)
+        };
+    }
+}
+
 pub fn tar_folder(folder: &Folder, out: &Path) -> Result<()> {
     let src = real_path(folder);
     if !src.is_dir() {
@@ -160,12 +175,18 @@ pub fn pack(dir: &Path, out: &Path) -> Result<()> {
             "--zstd",
             "-cf",
             &out.display().to_string(),
-            ".",
+            "meta.json",
+            "service.json",
+            "state",
+            "requires",
         ],
     )
 }
 
 pub fn unpack(archive: &Path, dir: &Path) -> Result<()> {
+    if archive.as_os_str() != "-" {
+        fs::metadata(archive).map_err(Error::io(format!("open {}", archive.display())))?;
+    }
     run_stdio(
         "tar",
         &[

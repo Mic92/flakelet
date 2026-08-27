@@ -586,7 +586,9 @@ fn run(cli: &Cli) -> Result<bool> {
             out: Some(out),
         } => {
             mgr.export(name, out)?;
-            eprintln!("{name}: exported to {}", out.display());
+            if out.as_os_str() != "-" {
+                eprintln!("{name}: exported to {}", out.display());
+            }
         }
         Cmd::Import {
             archive,
@@ -596,7 +598,12 @@ fn run(cli: &Cli) -> Result<bool> {
         } => {
             let (name, outcome) =
                 mgr.import(archive, name.as_deref(), settings.clone(), opts.clone())?;
-            println!("{name}: {}", describe(&outcome));
+            match &outcome {
+                UpdateOutcome::Updated { generation } => {
+                    println!("{name}: imported as generation {generation}")
+                }
+                other => println!("{name}: {}", describe(other)),
+            }
             return Ok(success(&outcome));
         }
         Cmd::Lock { name } => {

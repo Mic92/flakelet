@@ -627,7 +627,9 @@ impl Manager {
         let dir = work.path();
         write_json_atomic(&dir.join("meta.json"), &meta)?;
         write_json_atomic(&dir.join("service.json"), &svc)?;
-        fs::create_dir(dir.join("state")).map_err(Error::io("create state dir"))?;
+        for d in ["state", "requires"] {
+            fs::create_dir(dir.join(d)).map_err(Error::io("create export dir"))?;
+        }
 
         eprintln!("{name}: stopping units");
         systemd::stop_all(&st.units)?;
@@ -764,22 +766,36 @@ impl Manager {
         self.import_precheck(name, target, &artifact.exports)?;
 
         systemd::stop_all(&st.units)?;
-        for (i, folder) in target.folders.iter().enumerate() {
-            eprintln!("{name}: restoring {}", folder.path.display());
-            transfer::untar_folder(folder, &dir.join(format!("state/{i}.tar")))?;
-        }
-        transfer::provider_hooks(&artifact.exports, &self.config.providers_dir, dir, true)?;
-        if let Some(unit) = &target.restore {
-            eprintln!("{name}: running {unit}");
-            systemd::relink(&artifact.units)?;
-            if !systemd::start_oneshot(unit)? {
-                return Err(Error::OneshotFailed {
-                    service: name.into(),
-                    unit: unit.clone(),
-                });
+        let run = || -> Result<()> {
+            for (i, folder) in target.folders.iter().enumerate() {
+                eprintln!("{name}: restoring {}", folder.path.display());
+                transfer::untar_folder(folder, &dir.join(format!("state/{i}.tar")))?;
+            }
+            transfer::provider_hooks(&artifact.exports, &self.config.providers_dir, dir, true)?;
+            if let Some(unit) = &target.restore {
+                eprintln!("{name}: running {unit}");
+                systemd::relink(&artifact.units)?;
+                if !systemd::start_oneshot(unit)? {
+                    return Err(Error::OneshotFailed {
+                        service: name.into(),
+                        unit: unit.clone(),
+                    });
+                }
+            }
+            Ok(())
+        };
+        let result = run();
+        if result.is_err() {
+            // Verified empty above, so this only drops what was just extracted.
+            for folder in &target.folders {
+                transfer::clear_dir(&transfer::real_path(folder));
+            }
+            let _ = systemd::remove(&artifact.units);
+            if !st.units.is_empty() {
+                let _ = systemd::relink(&st.units);
             }
         }
-        Ok(())
+        result
     }
 
     pub fn update(&self, name: &str, opts: UpdateOpts) -> Result<UpdateOutcome> {
