@@ -12,12 +12,11 @@
         };
 
         impl =
-          {
-            options,
-            pkgs,
-            name,
-            ...
-          }:
+          { options, inputs }:
+          let
+            inherit (inputs.nixpkgs) pkgs;
+            inherit (inputs.flakelet) name;
+          in
           {
             services.${name} = {
               description = "${name} example service";

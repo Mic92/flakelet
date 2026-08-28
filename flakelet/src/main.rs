@@ -1,6 +1,7 @@
 use flakelet_core::config::ServiceConfig;
 use flakelet_core::error::Error;
 use flakelet_core::nix::Nix;
+use flakelet_core::state::{DisabledBy, Origin};
 use flakelet_core::{CheckOpts, Manager, Result, UpdateOpts, UpdateOutcome};
 use lexopt::prelude::*;
 use serde_json::Value;
@@ -34,9 +35,12 @@ Commands:
                         Show service status
   diff <name>           Closure diff between the running generation and a fresh evaluation
   rollback <name>       Switch back to the previous generation
-  export <name> [-o <file>|-] [--dry-run]
-                        Stop the service and archive its state for another machine
-  import <file>|- [--name <name>] [--settings <file>] [update options]
+  disable <name> [-m <reason>]
+                        Stop the service and keep it stopped across updates and reboots
+  enable <name>         Start a disabled service again on its current generation
+  export <name> [-o <file>|-] [--to <host>] [--copy] [--dry-run]
+                        Stop the service, archive its state and leave it disabled
+  import <file>|- [--name <name>] [--settings <file>] [--replace] [update options]
                         Restore an exported service and start it
   lock <name>           Pin a service to the currently deployed flake revision
   unlock <name>         Remove the pin
@@ -168,18 +172,38 @@ Closure diff between the running generation and a fresh evaluation.
 Example:
   flakelet diff web
 ",
+        "disable" => "\
+Usage: flakelet disable <name> [-m <reason>]
+
+Stop and unlink the service's units and mark it disabled. Updates, host
+activations and reboots leave it alone until 'flakelet enable'.
+Generations and state folders are kept.
+
+Example:
+  flakelet disable web -m 'db maintenance'
+",
+        "enable" => "\
+Usage: flakelet enable <name>
+
+Clear the disabled mark and start the current generation again. Nothing
+is evaluated, so this works offline. Run 'flakelet update' afterwards to
+catch up.
+",
         "export" => "\
-Usage: flakelet export <name> [-o <file>|-] [--dry-run]
+Usage: flakelet export <name> [-o <file>|-] [--to <host>] [--copy] [--dry-run]
 
 Stop all units of the service, run its <name>-dump.service and provider
-dumps, archive the StateDirectory= folders and start the units again.
+dumps and archive the StateDirectory= folders. The service is then left
+disabled on this host so it does not run next to the imported copy;
+'flakelet enable' aborts the move. --to only labels the reason shown in
+status. --copy starts the units again instead (backups, clones).
 The zstd tar goes to stdout unless -o names a file. It carries the locked
-flake ref and settings but no store paths and no secrets. Progress is on
-stderr. --dry-run prints what would be exported as JSON, or why not.
+flake ref and the state, but no settings, store paths or secrets.
+--dry-run prints what would be exported as JSON, or why not.
 
 Examples:
-  flakelet export web | ssh hostb flakelet import -
-  flakelet export web -o web.flakelet.tar.zst
+  flakelet export web --to hostb | ssh hostb flakelet import -
+  flakelet export web --copy -o web.flakelet.tar.zst
   flakelet export web --dry-run | jq .state
 ",
         "import" => "\
@@ -188,8 +212,10 @@ Usage: flakelet import <file>|- [--name <name>] [--settings <file>] [update opti
 Build the exported service (pinned to the exported revision), restore its
 state folders and provider resources, run <name>-restore.service and
 activate. If <name> is already declared on this host that entry is used
-and --settings is ignored; otherwise a manual service is registered.
-State folders on this host must be empty.
+and --settings is ignored. Otherwise a manual service is registered with
+the settings from --settings (default: none). State folders on this host
+must be empty; --replace clears them (and sets FLAKELET_REPLACE=1 for
+provider restore hooks) when this host already ran the service.
 
 Examples:
   ssh hosta flakelet export web | flakelet import -
@@ -267,9 +293,18 @@ enum Cmd {
     Rollback {
         name: String,
     },
+    Disable {
+        name: String,
+        reason: String,
+    },
+    Enable {
+        name: String,
+    },
     Export {
         name: String,
         out: Option<PathBuf>,
+        copy: bool,
+        to: Option<String>,
     },
     Import {
         archive: PathBuf,
@@ -318,10 +353,17 @@ fn main() -> ExitCode {
         Ok(false) => ExitCode::FAILURE,
         Err(err) => {
             eprintln!("error: {err}");
-            ExitCode::FAILURE
+            if err.is_network_error() {
+                ExitCode::from(EX_TEMPFAIL)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
+
+/// sysexits.h; lets service managers retry only transient failures.
+const EX_TEMPFAIL: u8 = 75;
 
 /// Ok(None) means: help was requested and printed.
 fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
@@ -355,6 +397,9 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     let mut dry_run = false;
     let mut purge = false;
     let mut name_opt = None;
+    let mut reason = None;
+    let mut copy = false;
+    let mut to = None;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => {
@@ -378,6 +423,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("dry-run") => dry_run = true,
             Long("purge") => purge = true,
             Long("name") => name_opt = Some(parser.value()?.string()?),
+            Short('m') | Long("message") => reason = Some(parser.value()?.string()?),
+            Long("copy") => copy = true,
+            Long("to") => to = Some(parser.value()?.string()?),
+            Long("replace") => opts.replace = true,
             Value(v) => names.push(v.string()?),
             _ => return Err(arg.unexpected()),
         }
@@ -459,8 +508,17 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Cmd::Export {
                 name: one_name(&names)?,
                 out,
+                copy,
+                to,
             }
         }
+        "disable" => Cmd::Disable {
+            name: one_name(&names)?,
+            reason: reason.unwrap_or_else(|| "disabled by operator".into()),
+        },
+        "enable" => Cmd::Enable {
+            name: one_name(&names)?,
+        },
         "import" => Cmd::Import {
             archive: one_name(&names)
                 .map_err(|_| "expected one archive path")?
@@ -602,8 +660,18 @@ fn run(cli: &Cli) -> Result<bool> {
             let generation = mgr.rollback(name)?;
             println!("{name}: rolled back to generation {generation}");
         }
-        Cmd::Export { name, out: None } => {
-            let (meta, _, _) = mgr.export_meta(name)?;
+        Cmd::Disable { name, reason } => {
+            mgr.disable(name, reason)?;
+            println!("{name}: disabled");
+        }
+        Cmd::Enable { name } => match mgr.enable(name)? {
+            Some(g) => println!("{name}: enabled, running generation {g}"),
+            None => println!("{name}: enabled, nothing deployed yet, run 'flakelet update {name}'"),
+        },
+        Cmd::Export {
+            name, out: None, ..
+        } => {
+            let (meta, _) = mgr.export_meta(name)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&meta).expect("meta is serializable")
@@ -612,10 +680,15 @@ fn run(cli: &Cli) -> Result<bool> {
         Cmd::Export {
             name,
             out: Some(out),
+            copy,
+            to,
         } => {
-            mgr.export(name, out)?;
+            mgr.export(name, out, *copy, to.as_deref())?;
             if out.as_os_str() != "-" {
                 eprintln!("{name}: exported to {}", out.display());
+            }
+            if !*copy {
+                eprintln!("{name}: disabled here, 'flakelet enable {name}' undoes that");
             }
         }
         Cmd::Import {
@@ -697,7 +770,9 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
         return Ok(());
     }
     for s in status {
-        let state = if s.held.is_some() {
+        let state = if s.disabled.is_some() {
+            "disabled"
+        } else if s.held.is_some() {
             "held"
         } else if s.degraded {
             "degraded"
@@ -725,6 +800,12 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
             s.flake,
             mark
         );
+        if let Some(d) = &s.disabled {
+            println!("\t{}", d.reason);
+            if d.by == DisabledBy::Export && s.origin == Origin::Declarative {
+                println!("\tstill declared on this host, remove it from the configuration");
+            }
+        }
         if let Some(err) = s.held.as_deref().or(s.last_error.as_deref()) {
             let lines: Vec<&str> = err
                 .lines()
@@ -768,6 +849,7 @@ fn describe(outcome: &UpdateOutcome) -> String {
             format!("degraded, kept current generation: {reason}")
         }
         UpdateOutcome::Held { reason } => format!("held after previous failure: {reason}"),
+        UpdateOutcome::Disabled { reason } => format!("disabled, left alone: {reason}"),
         UpdateOutcome::RolledBack { reason } => format!("deploy failed, rolled back: {reason}"),
     }
 }

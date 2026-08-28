@@ -28,6 +28,15 @@
         default = flakelet;
       });
 
+      # Build a service artifact off-machine, for `services.<name>.prebuilt`
+      # or `flakelet activate`: flakelet.lib.buildArtifact pkgs { name; module; settings; }
+      lib.buildArtifact =
+        pkgs:
+        import ./lib/artifact.nix {
+          inherit pkgs;
+          adios = adios.outPath;
+        };
+
       nixosModules = {
         flakelet =
           { pkgs, lib, ... }:
@@ -73,7 +82,10 @@
         package = self.packages.${system}.flakelet;
         lib = nixpkgs.legacyPackages.${system}.callPackage ./tests/lib.nix { adios = adios.outPath; };
         vm = nixpkgs.legacyPackages.${system}.testers.runNixOSTest (
-          import ./tests/vm.nix { flakeletModule = self.nixosModules.flakelet; }
+          import ./tests/vm.nix {
+            flakeletModule = self.nixosModules.flakelet;
+            inherit (self.lib) buildArtifact;
+          }
         );
         vm-transfer = nixpkgs.legacyPackages.${system}.testers.runNixOSTest (
           import ./tests/vm-transfer.nix { flakeletModule = self.nixosModules.flakelet; }

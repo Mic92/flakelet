@@ -9,13 +9,21 @@ let
   cfg = config.services.flakelets;
   flakelet = lib.getExe cfg.package;
   updateService = args: {
-    wants = [ "network-online.target" ];
+    wants = [ "flakelet-providers.target" ];
     after = [
-      "network-online.target"
+      "network.target"
+      "flakelet-providers.target"
       "flakelet-reconcile.service"
     ];
+    # A first deploy while offline exits EX_TEMPFAIL. Retry with backoff
+    # instead of blocking boot on network-online.target.
+    startLimitIntervalSec = 0;
     serviceConfig = {
       Type = "oneshot";
+      RestartForceExitStatus = 75;
+      RestartSec = "10s";
+      RestartSteps = 5;
+      RestartMaxDelaySec = "5min";
       Nice = 10;
       IOSchedulingClass = "idle";
       MemoryHigh = "75%";
@@ -52,6 +60,12 @@ in
     systemd.targets.flakelet = {
       description = "flakelet managed services";
       wantedBy = [ "multi-user.target" ];
+    };
+
+    # Providers order their backing service before this so `provision`
+    # hooks can run when updates start at boot.
+    systemd.targets.flakelet-providers = {
+      description = "flakelet contract providers ready";
     };
 
     systemd.services = {

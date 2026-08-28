@@ -14,7 +14,19 @@ let
     name = "web";
   };
 
-  checked = flakeletLib.evalOptions {
+  # Option values as impl sees them, for the given declarations and settings.
+  evalOptions =
+    options: settings:
+    (flakeletLib.evalModule (_: {
+      inherit options;
+      impl =
+        { options, ... }:
+        {
+          services.web.serviceConfig.ExecStart = "/bin/true";
+          exports.options = options;
+        };
+    }) { inherit settings; }).exports.options;
+  checked = evalOptions {
     greeting = {
       type = flakeletLib.types.string;
       description = "demo greeting";
@@ -26,6 +38,10 @@ let
     token = {
       type = flakeletLib.types.option flakeletLib.types.string;
     };
+    dir = {
+      type = flakeletLib.types.string;
+      defaultFunc = { inputs, ... }: "/var/lib/${inputs.flakelet.name}";
+    };
   } { greeting = "hi"; };
 
   evaluated = flakeletLib.evalModule (
@@ -36,12 +52,11 @@ let
         default = 9000;
       };
       impl =
-        {
-          options,
-          pkgs,
-          name,
-          ...
-        }:
+        { options, inputs }:
+        let
+          inherit (inputs.nixpkgs) pkgs;
+          inherit (inputs.flakelet) name;
+        in
         {
           services.${name}.serviceConfig.ExecStart =
             "${pkgs.coreutils}/bin/true --port ${toString options.port}";
@@ -146,45 +161,20 @@ assert
     greeting = "hi";
     port = 8080;
     token = null;
+    dir = "/var/lib/web";
   };
-assert fails (
-  flakeletLib.evalOptions {
-    p = {
-      type = flakeletLib.types.number;
-    };
-  } { q = 1; }
-);
-assert fails (
-  flakeletLib.evalOptions {
-    p = {
-      type = flakeletLib.types.number;
-    };
-  } { p = "x"; }
-);
-assert fails (
-  flakeletLib.evalOptions {
-    p = {
-      type = flakeletLib.types.number;
-    };
-  } { }
-);
-assert fails (
-  flakeletLib.evalOptions {
-    p = {
-      type = flakeletLib.types.number;
-      defaultFunc = _: 1;
-    };
-  } { p = 1; }
-);
+assert fails (evalOptions {
+  p.type = flakeletLib.types.number;
+} { q = 1; });
+assert fails (evalOptions {
+  p.type = flakeletLib.types.number;
+} { p = "x"; });
+assert fails (evalOptions {
+  p.type = flakeletLib.types.number;
+} { });
 assert evaluated.exports.ports.http.port == 9000;
 assert lib.attrNames evaluated.units == [ "web.service" ];
 assert fails (flakeletLib.evalModule { options = { }; } { settings = { }; });
-assert fails (
-  flakeletLib.evalModule (_: {
-    inputs.nixpkgs.path = "/nixpkgs";
-    impl = _: { };
-  }) { settings = { }; }
-);
 # Unknown settings are rejected even when impl never reads options.
 assert fails (
   (flakeletLib.evalModule (_: {
@@ -249,6 +239,19 @@ assert fails (
     dumpScript = "z";
   }
 );
+# dumpScript has nothing to read without a StateDirectory=; a health probe
+# does not need one.
+assert fails (
+  flakeletLib.render {
+    services.web.serviceConfig.ExecStart = "x";
+    dumpScript = "z";
+  }
+);
+assert
+  (flakeletLib.render {
+    services.web.serviceConfig.ExecStart = "x";
+    healthCheck = "z";
+  }) ? units."web-health.service";
 assert result.exports.ports.http.port == 8080;
 assert
   lib.attrNames result.units == [
@@ -279,8 +282,14 @@ runCommand "flakelet-lib-test" { units = linkFarm "flakelet-lib-test-units" resu
   grep -qx 'ExecStart=/bin/false worker' $units/web-worker.service
   grep -qx 'Description=setup done' $units/web-pre.target
   grep -qx 'PathChanged=/var/lib/web' $units/web-watch.path
-  grep -qx 'ExecStart=/bin/probe' $units/web-health.service
-  grep -qx 'Type=oneshot' $units/web-health.service
+  h=$units/web-health.service
+  grep -qx 'ExecStart=/bin/probe' $h
+  grep -qx 'Type=oneshot' $h
+  grep -qx 'TimeoutStartSec=1min' $h
+  # probe runs as the main unit's user so it can reach 0660 sockets/state
+  grep -qx 'User=web' $h
+  grep -qx 'DynamicUser=true' $h
+  grep -qx 'StateDirectory=web web/sub alias:link' $h
   d=$units/web-dump.service
   grep -qx 'ExecStart=/bin/dump' $d
   grep -qx 'Type=oneshot' $d

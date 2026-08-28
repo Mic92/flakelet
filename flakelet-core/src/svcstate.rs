@@ -31,13 +31,8 @@ impl StateInfo {
     }
 }
 
-/// Empty when exportable. `need_restore` checks the import direction.
-pub fn blockers(
-    state: Option<&StateInfo>,
-    exports: &Value,
-    providers_dir: &Path,
-    need_restore: bool,
-) -> Vec<String> {
+/// Empty when exportable.
+pub fn blockers(state: Option<&StateInfo>, exports: &Value, providers_dir: &Path) -> Vec<String> {
     if state.is_none() {
         return vec!["generation was built without state.json, redeploy it".into()];
     }
@@ -46,14 +41,8 @@ pub fn blockers(
     if !claims.is_empty() {
         let providers = exports::providers(providers_dir).unwrap_or_default();
         for claim in claims {
-            match providers.iter().find(|p| p.claim() == claim) {
-                None => out.push(format!("no provider for requires.{claim} on this host")),
-                Some(p) if p.state.is_none() => out.push(format!(
-                    "provider {} cannot {} requires.{claim}",
-                    p.contract,
-                    if need_restore { "restore" } else { "dump" }
-                )),
-                Some(_) => {}
+            if !providers.iter().any(|p| p.claim() == claim) {
+                out.push(format!("no provider for requires.{claim} on this host"));
             }
         }
     }
@@ -66,7 +55,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn providers_without_state_block_export() {
+    fn missing_providers_block_export() {
         let dir = tempfile::tempdir().unwrap();
         let state = StateInfo::default();
         let providers = dir.path().join("providers.d");
@@ -83,10 +72,9 @@ mod tests {
         .unwrap();
         let exports = serde_json::json!({ "requires": { "postgres": {}, "redis": {}, "s3": {} } });
 
-        let b = blockers(Some(&state), &exports, &providers, false);
-        assert_eq!(b.len(), 2, "{b:?}");
-        assert!(b[0].contains("postgres/v1 cannot dump"));
-        assert!(b[1].contains("requires.s3"));
-        assert_eq!(blockers(None, &exports, &providers, false).len(), 1);
+        let b = blockers(Some(&state), &exports, &providers);
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert!(b[0].contains("requires.s3"));
+        assert_eq!(blockers(None, &exports, &providers).len(), 1);
     }
 }

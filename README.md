@@ -13,203 +13,72 @@ and which settings to pass. The machine itself resolves the flake, evaluates
 and builds it, and switches the systemd units. There are no images and no
 registry. The units run straight out of the host's nix store.
 
-## Host configuration
+On the host:
 
 ```nix
-{
-  inputs.flakelet.url = "github:Mic92/flakelet";
-
-  # in a nixosConfiguration:
-  imports = [ flakelet.nixosModules.flakelet ];
-  services.flakelets = {
-    enable = true;
-    services.myservice = {
-      flake = "github:example/my-service";   # or prebuilt = <store path>;
-      settings = { port = 8080; };           # passed to the service module
-      autoUpdate.enable = true;              # periodic re-evaluation
-    };
+imports = [ flakelet.nixosModules.flakelet ];
+services.flakelets = {
+  enable = true;
+  services.web = {
+    flake = "github:example/web";
+    settings = { port = 8080; };
+    autoUpdate.enable = true;
   };
-}
+};
 ```
 
-Run `flakelet update myservice` on the machine, or let the generated timer do
-it. The update evaluates the flake against the host's nixpkgs, builds plain
-unit files, links them into `/run/systemd/system` and starts them. Every
-update becomes a generation with gc roots. If activation or the service's
-health probe fails, flakelet rolls back to the previous generation.
-
-Secrets never go through settings. Pass paths to host-managed secret files
-instead, for example from sops-nix, and load them in the unit with
-`LoadCredential=`.
-
-## Writing a service
-
-```console
-$ nix flake init -t github:Mic92/flakelet
-```
-
-A service flake exports an [adios](https://github.com/adisbladis/adios)-style
-module: declared `options` for what the host may pass, and an `impl`
-returning the units to run in a typed, NixOS-style interface. Hardening is
-ordinary systemd configuration such as `DynamicUser=` and `StateDirectory=`.
+In the service repository (`nix flake init -t github:Mic92/flakelet`):
 
 ```nix
 flakelets.default = { types, ... }: {
-  options.port = { type = types.number; default = 8000; description = "listen port"; };
-
-  impl = { options, pkgs, name, ... }: {
+  options.port = { type = types.number; default = 8000; };
+  impl = { options, inputs }: let inherit (inputs.nixpkgs) pkgs; inherit (inputs.flakelet) name; in {
     services.${name} = {
-      # no [Install] section: only started when the socket is hit
-      serviceConfig.ExecStart = "${pkgs.myservice}/bin/serve";
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig.ExecStart = "${pkgs.web}/bin/serve --port ${toString options.port}";
       serviceConfig.DynamicUser = true;
-    };
-    sockets.${name} = {
-      socketConfig.ListenStream = options.port;
-      wantedBy = [ "sockets.target" ];
+      serviceConfig.StateDirectory = name;
     };
   };
 };
 ```
 
-The host settings are checked against the options before `impl` is
-evaluated: unknown keys, wrong types and missing required settings fail the
-update with the offending name.
+`flakelet update web` on the machine, or the generated timer, evaluates the
+flake against the host's nixpkgs, builds plain unit files, links them into
+`/run/systemd/system` and starts them. Every update is a generation with gc
+roots. If activation or the service's health probe fails, flakelet rolls
+back. `flakelet export web | ssh hostb flakelet import -` moves it, state
+included, to another machine.
 
-Units with an `[Install]` section (`wantedBy`) are enabled and started on
-activation. Units without one are left to systemd's on-demand activation: a
-socket-activated service starts on the first connection, a timer's job runs
-on its schedule, not at deploy time. Changed units that are running are
-restarted either way.
+## Documentation
 
-The impl can also return `exports`, free-form metadata like claimed ports
-or metrics endpoints. flakelet publishes the exports of the running
-generation to `/run/flakelet/exports/<name>.json`, where firewall,
-reverse-proxy or monitoring tooling can pick them up.
+Guides
 
-The template in `templates/service/flake.nix` shows all of this. DESIGN.md
-describes the full contract.
+- [Writing a service](docs/guides/writing-a-service.md): options, units,
+  health checks, state, exports, secrets
+- [Host setup](docs/guides/host-setup.md): NixOS module, private flakes,
+  CI, prebuilt artifacts, day-to-day commands
+- [Moving a service](docs/guides/moving-a-service.md): export and import
 
-## Health checks
+Reference
 
-Use systemd for readiness and liveness. `Type=notify` or `ExecStartPost=`
-fail the start job if the service does not come up. A failed start job
-rolls the activation back. `Restart=` and `WatchdogSec=` keep the service
-alive afterwards.
+- [Service module](docs/reference/service-module.md): everything `impl`
+  may receive and return
+- [Host options](docs/reference/host-options.md): `services.flakelets.*`
+- [CLI](docs/reference/cli.md)
+- [Contracts](docs/reference/contracts.md): export schemas and providers
+- [Files on the machine](docs/reference/files.md)
 
-For an end-to-end probe, return `healthCheck`. flakelet runs it as
-`<name>-health.service` after every activation. If it fails, flakelet
-rolls back:
+Background
 
-```nix
-impl = { options, pkgs, name, ... }: {
-  services.${name} = { … };
+- [Design](docs/design.md): why it works the way it does
 
-  healthCheck = pkgs.writeShellScript "${name}-health" ''
-    exec ${pkgs.curl}/bin/curl -sf --retry 5 --retry-connrefused --retry-delay 2 \
-      http://127.0.0.1:${toString options.port}/ -o /dev/null
-  '';
-};
-```
-
-`healthCheck` expands to a oneshot with `DynamicUser=` and
-`TimeoutStartSec=1min`. That is not always enough. The probe may need
-credentials, a specific user or a longer timeout. In that case write
-`services.health` yourself:
-
-```nix
-services.health = {
-  serviceConfig = {
-    Type = "oneshot";
-    ExecStart = "${pkgs.myservice}/bin/selftest --socket /run/${name}/api.sock";
-    User = name;
-    TimeoutStartSec = "5min";
-    LoadCredential = "token:/run/secrets/${name}-token";
-  };
-};
-```
-
-Rerun it by hand with `systemctl start myservice-health`.
-
-## State
-
-flakelet reads state from the unit. `StateDirectory=` is copied.
-`User=`/`DynamicUser=` owns it. `CacheDirectory=`, `RuntimeDirectory=`
-and `LogsDirectory=` are left behind.
-
-This moves a service with its data to another machine:
-
-```console
-$ flakelet export web | ssh hostb flakelet import -
-```
-
-`export` stops the units. It archives the state folders, the artifact and
-the settings. Then it starts the service again. `import` unpacks the
-archive and fixes ownership. Then it activates the service and runs the
-health probe.
-
-Some state cannot be copied as-is. To serialise it before the copy,
-return `dumpScript`. To load it afterwards, return `restoreScript`. Both
-run as the main unit's user with its `StateDirectory=`. The other units
-are stopped while they run:
-
-```nix
-impl = { pkgs, name, ... }: {
-  services.${name}.serviceConfig = {
-    ExecStart = "${pkgs.myservice}/bin/serve --db /var/lib/${name}/db.sqlite";
-    DynamicUser = true;
-    StateDirectory = name;
-  };
-
-  # flush the WAL so the copied file is consistent
-  dumpScript = pkgs.writeShellScript "${name}-dump" ''
-    ${pkgs.sqlite}/bin/sqlite3 /var/lib/${name}/db.sqlite 'PRAGMA wal_checkpoint(TRUNCATE);'
-  '';
-  # rebuild derived data instead of shipping it
-  restoreScript = pkgs.writeShellScript "${name}-restore" ''
-    ${pkgs.myservice}/bin/reindex --db /var/lib/${name}/db.sqlite
-  '';
-};
-```
-
-`dumpScript` and `restoreScript` generate a `<name>-dump.service` and
-`<name>-restore.service` oneshot for you. If you need other unit settings,
-define `services.dump` or `services.restore` yourself instead, as shown
-for `services.health` above.
-
-## CLI
-
-```
-flakelet update [<name>…]        evaluate, build and activate
-flakelet status [--json]         generation, degraded/held state, lock holders
-flakelet diff <name>             closure diff: running generation vs. fresh eval
-flakelet rollback <name>         previous generation
-flakelet export <name> [-o f]    stop, archive state to stdout, start again
-flakelet import <f>|- [--name n] restore an export here and start it
-flakelet remove [--purge] <name> stop a service; --purge also empties its state folders
-flakelet reconcile               remove services dropped from the host config
-flakelet lock/unlock <name>      pin to the currently deployed revision
-flakelet deploy <name> --flake <ref> --settings s.json    imperative service
-flakelet activate <name> <path>  start a prebuilt artifact, no evaluation
-flakelet check [--build] [--machine <host>]               CI: evaluate/build off-machine
-flakelet build <name>… [--out-link <dir>]                 like check, with result symlinks
-flakelet gc [--keep <n>]         prune old generations
-```
-
-The check command also works away from the machine. For example,
-`flakelet check --machine eve --build` evaluates the flakelet configuration
-of `nixosConfigurations.eve` in the current flake and builds all of its
-service artifacts. Run it in CI to catch broken services before they reach
-the machine and to fill the binary cache.
-
-## Contracts and providers
-
-Blessed contracts live in [contracts/](contracts/) as JSON Schema, with
-eval-time constructors in the injected `contracts`. Known implementations:
+## Providers
 
 | Contract      | Implementation                                                    | export/import |
 | ------------- | ----------------------------------------------------------------- | ------------- |
 | `http/v1`     | [flakelet-nginx](https://github.com/Mic92/flakelet-nginx)         | stateless     |
-| `postgres/v1` | [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)   | not yet       |
+| `postgres/v1` | [flakelet-postgres](https://github.com/Mic92/flakelet-postgres)   | yes           |
 
 ## Real-world examples
 
@@ -229,5 +98,3 @@ $ nix develop
 $ cargo test
 $ nix build .#checks.x86_64-linux.vm -L   # end-to-end NixOS VM test
 ```
-
-Design notes live in [DESIGN.md](DESIGN.md).

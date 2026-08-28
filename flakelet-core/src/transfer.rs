@@ -21,6 +21,9 @@ pub struct ExportMeta {
     pub name: String,
     pub source_host: String,
     pub created: u64,
+    /// Unlocked ref and output, enough to register the entry elsewhere.
+    pub flake: String,
+    pub output: String,
     pub flake_url: String,
     pub flake_rev: String,
     pub settings_hash: String,
@@ -28,8 +31,6 @@ pub struct ExportMeta {
     pub exports: Value,
     /// How the folders were made consistent. Only "stopped" so far.
     pub consistency: String,
-    /// Settings keys (dotted) whose values were host paths on the source.
-    pub path_settings: Vec<String>,
 }
 
 impl ExportMeta {
@@ -48,30 +49,6 @@ impl ExportMeta {
         }
         Ok(meta)
     }
-}
-
-pub fn path_settings(settings: &Value) -> Vec<String> {
-    fn walk(prefix: &str, v: &Value, out: &mut Vec<String>) {
-        match v {
-            Value::String(s) if s.starts_with('/') && !s.starts_with("/nix/store/") => {
-                out.push(prefix.to_string())
-            }
-            Value::Object(o) => {
-                for (k, v) in o {
-                    let key = if prefix.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{prefix}.{k}")
-                    };
-                    walk(&key, v, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    walk("", settings, &mut out);
-    out
 }
 
 /// Where the data of a folder really lives: DynamicUser= state sits under
@@ -176,7 +153,6 @@ pub fn pack(dir: &Path, out: &Path) -> Result<()> {
             "-cf",
             &out.display().to_string(),
             "meta.json",
-            "service.json",
             "state",
             "requires",
         ],
@@ -199,41 +175,55 @@ pub fn unpack(archive: &Path, dir: &Path) -> Result<()> {
     )
 }
 
-/// Run each provider's dump (or restore) for the `requires.*` claims.
+/// Run each provider's dump (or restore) hook for the `requires.*`
+/// claims, where the provider has one. A dump in the archive without a
+/// restore hook on this host is an error rather than dropped data.
 pub fn provider_hooks(
     exports: &Value,
     providers_dir: &Path,
     dir: &Path,
     restore: bool,
+    replace: bool,
 ) -> Result<()> {
     let Some(requires) = exports.get("requires").and_then(Value::as_object) else {
         return Ok(());
     };
     let providers = exports::providers(providers_dir).unwrap_or_default();
     for (claim, body) in requires {
-        let Some(hooks) = providers
+        let hooks = providers
             .iter()
             .find(|p| p.claim() == claim)
-            .and_then(|p| p.state.as_ref())
-        else {
-            return Err(Error::NotTransferable {
-                service: claim.clone(),
-                verb: if restore { "restored" } else { "dumped" },
-                reasons: vec![format!("no provider with state hooks for requires.{claim}")],
-            });
-        };
+            .and_then(|p| p.state.as_ref());
+        let hook = hooks.and_then(|h| if restore { &h.restore } else { &h.dump }.as_ref());
         let sub = dir.join("requires").join(claim);
+        let Some(hook) = hook else {
+            if restore && sub.exists() {
+                return Err(Error::NotTransferable {
+                    service: claim.clone(),
+                    verb: "restored",
+                    reasons: vec![format!(
+                        "archive carries requires.{claim} data but no provider here can restore it"
+                    )],
+                });
+            }
+            continue;
+        };
         fs::create_dir_all(&sub).map_err(Error::io(format!("create {}", sub.display())))?;
         let claim_file = sub.join("claim.json");
         write_json_atomic(&claim_file, body)?;
-        let hook = if restore { &hooks.restore } else { &hooks.dump };
         eprintln!("requires.{claim}: running {}", hook.display());
-        run(
+        let env: &[(&str, &str)] = if replace {
+            &[("FLAKELET_REPLACE", "1")]
+        } else {
+            &[]
+        };
+        run_env(
             &hook.display().to_string(),
             &[
                 &claim_file.display().to_string(),
                 &sub.display().to_string(),
             ],
+            env,
         )?;
     }
     Ok(())
@@ -280,9 +270,14 @@ fn run_stdio(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn run(program: &str, args: &[&str]) -> Result<()> {
+pub(crate) fn run(program: &str, args: &[&str]) -> Result<()> {
+    run_env(program, args, &[])
+}
+
+fn run_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<()> {
     let out = Command::new(program)
         .args(args)
+        .envs(env.iter().copied())
         .output()
         .map_err(|source| Error::Spawn {
             program: program.into(),
@@ -301,15 +296,6 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn path_settings_are_dotted_keys() {
-        let s = serde_json::json!({
-            "port": 1, "cert": "/run/secrets/c", "pkg": "/nix/store/x",
-            "smtp": { "passwordFile": "/run/s" }
-        });
-        assert_eq!(path_settings(&s), ["cert", "smtp.passwordFile"]);
-    }
 
     #[test]
     fn folders_follow_the_entry_name() {

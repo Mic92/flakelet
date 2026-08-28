@@ -92,7 +92,7 @@ in
 
     adios = lib.mkOption {
       type = lib.types.path;
-      description = "adios library source injected into service modules.";
+      description = "adios source used to load service modules.";
     };
 
     flakeletLib = lib.mkOption {

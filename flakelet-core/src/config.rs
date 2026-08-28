@@ -25,10 +25,9 @@ pub struct Config {
     pub providers_dir: PathBuf,
     /// Store path of the host's nixpkgs source, imported once by the driver.
     pub nixpkgs: Option<PathBuf>,
-    /// Store path of the adios library source, injected into service modules.
+    /// Store path of the adios source that loads service modules.
     pub adios: Option<PathBuf>,
-    /// Store path of flakelet.lib (mkService, storePath), injected into
-    /// service modules as `flakeletLib`.
+    /// Store path of flakelet.lib, imported by the driver as `flakeletLib`.
     pub flakelet_lib: Option<PathBuf>,
     /// Extra host-provided helper modules passed to service functions.
     pub extra_modules: Vec<PathBuf>,
@@ -126,9 +125,7 @@ impl Config {
                 })
             }
         };
-        // The driver validates modules with flakelet.lib, which imports
-        // korora from the adios source tree; fail early instead of deep
-        // inside an evaluation.
+        // The driver needs both; fail early instead of deep inside an evaluation.
         if cfg.flakelet_lib.is_none() || cfg.adios.is_none() {
             return Err(Error::LibRequiresAdios);
         }

@@ -42,6 +42,8 @@ pub enum Error {
     InvalidServiceName(String),
     #[error("service '{0}' was never deployed")]
     NeverDeployed(String),
+    #[error("service '{service}' is disabled ({reason}), run 'flakelet enable {service}' first")]
+    Disabled { service: String, reason: String },
     #[error("service '{0}' has no older generation to roll back to")]
     NoOlderGeneration(String),
     #[error("settings of '{service}' reference dangling store path {path}")]
@@ -60,7 +62,7 @@ pub enum Error {
     OverrideWithPrebuilt(String),
     #[error("input override '{input}' of '{service}' is not supported; only 'nixpkgs' can be overridden")]
     UnsupportedInputOverride { service: String, input: String },
-    #[error("the config requires flakelet_lib and adios (module validation and the korora type checker)")]
+    #[error("the config requires flakelet_lib and adios to load service modules")]
     LibRequiresAdios,
     #[error("credential path {0} contains whitespace or quotes")]
     UnsafeCredentialPath(PathBuf),
