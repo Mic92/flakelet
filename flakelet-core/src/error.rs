@@ -62,7 +62,7 @@ pub enum Error {
     OverrideWithPrebuilt(String),
     #[error("input override '{input}' of '{service}' is not supported; only 'nixpkgs' can be overridden")]
     UnsupportedInputOverride { service: String, input: String },
-    #[error("the config requires flakelet_lib and adios (module validation and the korora type checker)")]
+    #[error("the config requires flakelet_lib and adios to load service modules")]
     LibRequiresAdios,
     #[error("credential path {0} contains whitespace or quotes")]
     UnsafeCredentialPath(PathBuf),

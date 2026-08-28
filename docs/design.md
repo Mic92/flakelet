@@ -25,9 +25,9 @@ The moving parts are deliberately few:
 3. `flakelet.lib`, Nix code applied by the driver expression on the
    machine. It type-checks settings and renders what `impl` returns into
    unit files and `state.json`.
-4. The service flakes themselves, in the
-   [adios](https://github.com/adisbladis/adios) module shape, living in
-   their own repositories without flake inputs.
+4. The service flakes themselves, each exporting an
+   [adios](https://github.com/adisbladis/adios) module from its own
+   repository.
 
 ## Service contract
 
@@ -51,7 +51,7 @@ chosen over the NixOS module system because a service is one typed
 function call, not a fixpoint over all services, which keeps per-service
 evaluation cheap and errors local.
 
-Unit names and directories derive from the injected `name` rather than
+Unit names and directories derive from `inputs.flakelet.name` rather than
 being fixed by the flake, so the same flake can be instantiated several
 times on one machine, each instance with its own settings, state,
 generations, pin and timer.
@@ -509,12 +509,12 @@ ever arrives, provider-side
 grant options are the extension point. flakelet core would not change.
 
 Where a contract lives follows one criterion: whether services reach it
-through the injected module arguments (service flakes are input-free, so
-anything they need must be injectable) and whether core interprets it.
+through the `/flakelet` input (they get nothing from the host any other
+way) and whether core interprets it.
 `ports` and `state` are core-interpreted and cannot move. Pure descriptions
 that are near-universal and multi-implementation — `http`, later `metrics`
 — are blessed here: JSON Schema in `contracts/`, constructor in
-the injected `contracts`. Backing-service contracts such as `postgres` live
+`inputs.flakelet.contracts`. Backing-service contracts such as `postgres` live
 in their implementation's repository (`flakelet-postgres`), because their
 hard parts — add-only provisioning, orphans, rollback interplay — are
 inseparable from the provider, and the family is open-ended (redis,

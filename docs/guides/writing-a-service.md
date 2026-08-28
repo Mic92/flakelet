@@ -9,7 +9,7 @@ $ nix flake init -t github:Mic92/flakelet
 A service flake exports an [adios](https://github.com/adisbladis/adios)
 module under `flakelets.<attr>`. It does not need a nixpkgs flake input:
 the host hands in `pkgs` and the entry `name` as adios inputs. Other
-flake inputs work as usual.
+flake inputs of the service flake work as usual.
 
 ```nix
 {

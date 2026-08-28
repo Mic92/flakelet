@@ -7,7 +7,7 @@ For examples see [Host setup](../guides/host-setup.md).
 | `enable`                      | bool                | `false`              | install the `flakelet` user, state/cache dirs, `flakelet-boot.service`, `flakelet-reconcile.service`, `flakelet.target` and render `/etc/flakelet/config.json` |
 | `package`                     | package             | this flake's build   | flakelet binary |
 | `nixpkgs`                     | path                | `pkgs.path`          | nixpkgs source the driver imports for all services |
-| `adios`                       | path                | this flake's input   | adios source injected as `types` |
+| `adios`                       | path                | this flake's input   | adios source that loads service modules |
 | `flakeletLib`                 | path                | `./lib`              | `flakelet.lib` used by the driver |
 | `extraModules`                | listOf path         | `[ ]`                | files imported and passed to `impl` as `extraModules` |
 | `eval.workers`                | positive int        | `1`                  | nix-eval-jobs workers |

@@ -1358,10 +1358,9 @@ fn health_check_run(name: &str, units: &Units) -> Result<()> {
 }
 
 /// Resolve input_overrides to locked references. Only 'nixpkgs' is supported:
-/// pkgs is the one dependency flakelet itself injects, so it can be swapped
-/// out here, while other inputs would require rewriting the flake's own lock,
-/// which builtins.getFlake cannot do purely (and the service contract forbids
-/// flake inputs anyway).
+/// it is the one dependency flakelet hands in, while the service flake's own
+/// inputs would need their lock rewritten, which builtins.getFlake cannot do
+/// purely.
 fn resolve_overrides(
     name: &str,
     svc: &ServiceConfig,
