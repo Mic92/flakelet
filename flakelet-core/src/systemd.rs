@@ -10,6 +10,18 @@ pub const RUNTIME_UNIT_DIR: &str = "/run/systemd/system";
 /// Map of unit name -> unit file store path.
 pub type Units = BTreeMap<String, PathBuf>;
 
+/// `foo@.service` cannot be started or enabled itself, only linked.
+fn is_template(unit: &str) -> bool {
+    unit.contains("@.")
+}
+
+/// `foo@1.service` -> `foo@.service`.
+pub(crate) fn template_of(unit: &str) -> Option<String> {
+    let (base, suffix) = unit.rsplit_once('.')?;
+    let (prefix, instance) = base.split_once('@')?;
+    (!instance.is_empty()).then(|| format!("{prefix}@.{suffix}"))
+}
+
 /// Switch a service from `old` to `new` units: link + reload + restart/start,
 /// then stop and unlink units that disappeared.
 pub fn switch(old: &Units, new: &Units) -> Result<()> {
@@ -20,7 +32,7 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
     // sockets before its successor starts.
     for (unit, _) in old.iter().filter(|(u, _)| !new.contains_key(*u)) {
         // Stop before disable: disable unlinks the unit file.
-        if is_loadable(unit)? {
+        if !is_template(unit) && is_loadable(unit)? {
             systemctl(&["stop", unit])?;
             systemctl(&["disable", "--runtime", unit])?;
             let _ = Command::new("systemctl")
@@ -39,17 +51,39 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
     }
     systemctl(&["daemon-reload"])?;
     for (unit, path) in new {
-        if old.get(unit) == Some(path) {
+        if old.get(unit) == Some(path) || is_template(unit) {
             continue;
         }
-        if has_install(unit, path)? {
+        let file = UnitFile::read(unit, path)?;
+        if file.install {
             systemctl(&["enable", "--runtime", unit])?;
+        }
+        if !file.restart_if_changed {
+            if file.install && !old.contains_key(unit) {
+                systemctl(&["start", unit])?;
+            }
+        } else if file.install {
             systemctl(&["restart", unit])?;
         } else if old.contains_key(unit) {
             // No [Install]: the unit is pulled in on demand (socket- or
             // timer-activated). Restart it only if it is actually running;
             // starting it eagerly would e.g. fire a timer's job on deploy.
             systemctl(&["try-restart", unit])?;
+        }
+    }
+    // Running instances of a changed template that flakelet did not
+    // enumerate (socket-activated, generator-enabled).
+    for (unit, path) in new {
+        if !is_template(unit) || old.get(unit) == Some(path) || !old.contains_key(unit) {
+            continue;
+        }
+        if !UnitFile::read(unit, path)?.restart_if_changed {
+            continue;
+        }
+        for instance in running_instances(unit)? {
+            if !new.contains_key(&instance) {
+                systemctl(&["try-restart", &instance])?;
+            }
         }
     }
     Ok(())
@@ -66,14 +100,14 @@ pub fn stop_all(units: &Units) -> Result<()> {
         return Ok(());
     }
     let mut args = vec!["stop"];
-    args.extend(units.keys().map(String::as_str));
+    args.extend(units.keys().filter(|u| !is_template(u)).map(String::as_str));
     systemctl(&args)
 }
 
 pub fn start_all(units: &Units) -> Result<()> {
     let mut args = vec!["start"];
     for (unit, path) in units {
-        if has_install(unit, path)? {
+        if !is_template(unit) && UnitFile::read(unit, path)?.install {
             args.push(unit);
         }
     }
@@ -90,7 +124,7 @@ pub fn relink(units: &Units) -> Result<()> {
     }
     systemctl(&["daemon-reload"])?;
     for (unit, path) in units {
-        if has_install(unit, path)? {
+        if !is_template(unit) && UnitFile::read(unit, path)?.install {
             systemctl(&["enable", "--runtime", unit])?;
         }
     }
@@ -108,9 +142,42 @@ fn is_loadable(unit: &str) -> Result<bool> {
     Ok(String::from_utf8_lossy(&out.stdout).trim() != "not-found")
 }
 
-fn has_install(unit: &str, path: &PathBuf) -> Result<bool> {
-    let text = fs::read_to_string(path).map_err(Error::io(format!("read unit {unit}")))?;
-    Ok(text.contains("[Install]"))
+struct UnitFile {
+    install: bool,
+    restart_if_changed: bool,
+}
+
+impl UnitFile {
+    fn read(unit: &str, path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path).map_err(Error::io(format!("read unit {unit}")))?;
+        Ok(Self {
+            install: text.contains("[Install]"),
+            restart_if_changed: !text.lines().any(|l| l.trim() == "X-RestartIfChanged=false"),
+        })
+    }
+}
+
+/// Loaded, active instances of a template unit.
+fn running_instances(template: &str) -> Result<Vec<String>> {
+    let pattern = template.replacen("@.", "@*.", 1);
+    let out = Command::new("systemctl")
+        .args([
+            "list-units",
+            "--plain",
+            "--no-legend",
+            "--state=active",
+            &pattern,
+        ])
+        .output()
+        .map_err(|source| Error::Spawn {
+            program: "systemctl".into(),
+            source,
+        })?;
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .map(str::to_owned)
+        .collect())
 }
 
 /// Start a oneshot probe unit; Ok(false) when the start job failed.

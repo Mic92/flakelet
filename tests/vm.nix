@@ -51,6 +51,19 @@ let
                 wantedBy = [ "multi-user.target" ];
                 serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
               };
+              sockets."echo@" = {
+                wantedBy = [ "sockets.target" ];
+                instances = [
+                  "1"
+                  "2"
+                ];
+                socketConfig.ListenStream = "/run/${name}-echo/%i.sock";
+                socketConfig.Accept = false;
+              };
+              services."echo@" = {
+                restartIfChanged = false;
+                serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
+              };
             };
         };
     };
@@ -124,6 +137,11 @@ in
     # A prebuilt artifact is activated without any evaluation.
     machine.succeed("systemctl start flakelet-static.service", timeout=120)
     machine.succeed("systemctl is-active static.service")
+    # Template instances are enabled and started; the service instance is
+    # socket-activated from the shared template file.
+    machine.succeed("systemctl is-active static-echo@1.socket static-echo@2.socket")
+    machine.succeed("${pkgs.socat}/bin/socat -u /dev/null UNIX-CONNECT:/run/static-echo/2.sock")
+    machine.wait_until_succeeds("systemctl is-active static-echo@2.service", timeout=30)
 
     # Imperative activation of a prebuilt artifact via the CLI.
     machine.succeed("flakelet activate cli ${cliArtifact}")

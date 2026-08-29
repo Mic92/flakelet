@@ -54,8 +54,9 @@ All keys optional. Unknown keys are errors. At least one unit must result.
 ### Unit naming
 
 Attribute `${name}` → `<name>.<type>`. Any other attribute `foo` →
-`<name>-foo.<type>`. flakelet refuses to activate a unit name already owned
-by another managed service or by the host.
+`<name>-foo.<type>`. A trailing `@` makes a template: `foo@` →
+`<name>-foo@.<type>`, `@` → `<name>@.<type>`. flakelet refuses to activate
+a unit name already owned by another managed service or by the host.
 
 ### *unit* (common to all types)
 
@@ -66,6 +67,7 @@ by another managed service or by the host.
 | `after` `before` `wants` `requires` `requisite` `bindsTo` `partOf` `conflicts` `onFailure` | corresponding `[Unit]` key, list of strings |
 | `unitConfig`                                                                               | extra `[Unit]` keys       |
 | `wantedBy` `requiredBy`                                                                    | `[Install]`               |
+| `instances` (templates only)                                                               | `<name>-foo@<i>.<type>` linked to the template file, enabled and started like any unit |
 
 `*Config` values: string, number, bool, path, derivation, or a list of
 those (rendered as repeated keys).
@@ -77,6 +79,7 @@ those (rendered as repeated keys).
 | key             | rendered as                                   |
 | --------------- | --------------------------------------------- |
 | `serviceConfig` | `[Service]`                                   |
+| `restartIfChanged` | default `true`. `false`: a changed unit is not restarted on activation, running instances drain and the next start uses the new file |
 | `environment`   | attrsOf scalar → `Environment=` lines         |
 | `path`          | list of packages/strings → prepended to `PATH` (coreutils etc. are appended like NixOS) |
 
@@ -97,7 +100,11 @@ exclusive with defining the corresponding `services.<key>` yourself.
 - Units with an `[Install]` section are enabled and (re)started.
 - Units without one are only `try-restart`ed if running. Otherwise left to
   socket/timer/dependency activation.
-- Units that disappeared are stopped and unlinked before new ones start.
+- Units that disappeared, including dropped `instances`, are stopped and
+  unlinked before new ones start.
+- Templates are only linked. Instances not listed in `instances` (socket
+  or dependency activated) are `try-restart`ed when the template changed
+  and they are running.
 - After switching, `<name>-health.service` is started if present. A failed
   start job, or any unit of the entry in `failed` state, rolls back.
 - `<name>-dump.service` / `<name>-restore.service` are never started by
