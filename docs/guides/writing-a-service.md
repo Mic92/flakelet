@@ -115,6 +115,28 @@ impl = { options, inputs }: … {
 ```
 
 
+## Template units
+
+An attribute ending in `@` is a systemd template. `instances` lists the
+ones flakelet enables. `%i` works as usual:
+
+```nix
+sockets."worker@" = {
+  wantedBy = [ "sockets.target" ];
+  instances = map toString (inputs.nixpkgs.lib.range 1 options.workers);
+  socketConfig.ListenStream = "/run/${name}/worker-%i.sock";
+};
+services."worker@" = {
+  # let a running instance finish, the next activation picks up changes
+  restartIfChanged = false;
+  serviceConfig.ExecStart = "${pkg}/bin/worker --id %i";
+  serviceConfig.User = "${name}-worker-%i";
+};
+```
+
+This renders `<name>-worker@.socket` once and links
+`<name>-worker@1.socket`, `<name>-worker@2.socket`, … to it.
+
 ## Health checks
 
 Use systemd for readiness and liveness. `Type=notify` or `ExecStartPost=`

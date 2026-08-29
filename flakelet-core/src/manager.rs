@@ -825,8 +825,7 @@ impl Manager {
         exports: &Value,
         need_empty: bool,
     ) -> Result<()> {
-        let mut reasons =
-            svcstate::blockers(Some(state), exports, &self.config.providers_dir);
+        let mut reasons = svcstate::blockers(Some(state), exports, &self.config.providers_dir);
         for f in &state.folders {
             let real = transfer::real_path(f);
             if need_empty && !transfer::is_empty_dir(&real) {
@@ -1286,7 +1285,12 @@ fn validate_units(name: &str, units: &Units, host_dirs: &[PathBuf]) -> Result<()
             .rsplit_once('.')
             .is_some_and(|(base, suffix)| match suffix {
                 _ if !UNIT_TYPES.contains(&suffix) => false,
-                _ => base == name || base.starts_with(&format!("{name}-")),
+                _ => {
+                    // `prefix` or `prefix@instance`, prefix being name or name-*
+                    let prefix = base.split_once('@').map_or(base, |(p, _)| p);
+                    base.matches('@').count() <= 1
+                        && (prefix == name || prefix.starts_with(&format!("{name}-")))
+                }
             });
         if !ok {
             return Err(Error::InvalidUnitName {
@@ -1294,12 +1298,16 @@ fn validate_units(name: &str, units: &Units, host_dirs: &[PathBuf]) -> Result<()
                 unit: unit.clone(),
             });
         }
-        if let Some(dir) = host_dirs.iter().find(|d| d.join(unit).exists()) {
-            return Err(Error::HostUnitConflict {
-                service: name.into(),
-                unit: unit.clone(),
-                path: dir.join(unit),
-            });
+        // An instance is also shadowed by a host-owned template.
+        let template = systemd::template_of(unit);
+        for candidate in std::iter::once(unit.as_str()).chain(template.as_deref()) {
+            if let Some(dir) = host_dirs.iter().find(|d| d.join(candidate).exists()) {
+                return Err(Error::HostUnitConflict {
+                    service: name.into(),
+                    unit: unit.clone(),
+                    path: dir.join(candidate),
+                });
+            }
         }
     }
     Ok(())
@@ -1538,6 +1546,9 @@ mod tests {
             "web.socket",
             "web-worker.timer",
             "web-pre.target",
+            "web@.service",
+            "web-agent@.socket",
+            "web-agent@1.socket",
         ]);
         assert!(validate_units("web", &ok, slice::from_ref(&host_dir)).is_ok());
 
@@ -1547,6 +1558,8 @@ mod tests {
             "web.mount",
             "web",
             "web-x.swap",
+            "web-a@b@c.service",
+            "webx@.service",
         ] {
             assert!(
                 matches!(
@@ -1560,7 +1573,13 @@ mod tests {
         // A unit the host already owns must not be shadowed.
         fs::write(host_dir.join("web.service"), "").unwrap();
         assert!(matches!(
-            validate_units("web", &units(&["web.service"]), &[host_dir]),
+            validate_units("web", &units(&["web.service"]), slice::from_ref(&host_dir)),
+            Err(Error::HostUnitConflict { .. })
+        ));
+        // An instance would be backed by a host template.
+        fs::write(host_dir.join("web-agent@.socket"), "").unwrap();
+        assert!(matches!(
+            validate_units("web", &units(&["web-agent@1.socket"]), &[host_dir]),
             Err(Error::HostUnitConflict { .. })
         ));
     }

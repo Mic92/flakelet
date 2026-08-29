@@ -65,6 +65,19 @@ let
                 wantedBy = [ "multi-user.target" ];
                 serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
               };
+              sockets."echo@" = {
+                wantedBy = [ "sockets.target" ];
+                instances = [
+                  "1"
+                  "2"
+                ];
+                socketConfig.ListenStream = "/run/${name}-echo/%i.sock";
+                socketConfig.Accept = false;
+              };
+              services."echo@" = {
+                restartIfChanged = false;
+                serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
+              };
             };
         };
     };
@@ -153,6 +166,11 @@ in
     # A prebuilt artifact is activated without any evaluation.
     machine.succeed("systemctl start flakelet-static.service", timeout=120)
     machine.succeed("systemctl is-active static.service")
+    # Template instances are enabled and started. The service instance is
+    # socket-activated from the shared template file.
+    machine.succeed("systemctl is-active static-echo@1.socket static-echo@2.socket")
+    machine.succeed("${pkgs.socat}/bin/socat -u /dev/null UNIX-CONNECT:/run/static-echo/2.sock")
+    machine.wait_until_succeeds("systemctl is-active static-echo@2.service", timeout=30)
 
     # Imperative activation of a prebuilt artifact via the CLI.
     machine.succeed("flakelet activate cli ${cliArtifact}")
@@ -165,7 +183,15 @@ in
     machine.succeed("systemctl is-active cli.service")
     machine.succeed("test \"$(ls /nix/var/nix/gcroots/flakelet/cli)\" = gen-1")
     assert "held" in machine.fail("flakelet activate cli ${brokenArtifact}")
+    # restartIfChanged=false: a running agent instance survives the switch,
+    # everything else of the entry is restarted.
+    machine.succeed("${pkgs.socat}/bin/socat -u /dev/null UNIX-CONNECT:/run/cli-echo/1.sock")
+    machine.wait_until_succeeds("systemctl is-active cli-echo@1.service", timeout=30)
+    pid = machine.succeed("systemctl show -P MainPID cli-echo@1.service").strip()
+    main = machine.succeed("systemctl show -P MainPID cli.service").strip()
     machine.succeed("flakelet activate cli ${cliArtifact2} | grep -q 'generation 2'")
+    assert pid == machine.succeed("systemctl show -P MainPID cli-echo@1.service").strip()
+    assert main != machine.succeed("systemctl show -P MainPID cli.service").strip()
     machine.succeed("flakelet rollback cli | grep -q 'generation 1'")
     machine.succeed("systemctl is-active cli.service")
     # lock pins what is deployed, not what upstream resolves to.

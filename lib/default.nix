@@ -81,6 +81,8 @@ let
         wantedBy = strings;
         requiredBy = strings;
         unitConfig = configSection;
+        # `foo@` templates only: instances flakelet enables and starts.
+        instances = strings;
       }
       // extra
     )).override
@@ -93,6 +95,7 @@ let
       services = t.attrsOf (
         unitType "service" {
           serviceConfig = configSection;
+          restartIfChanged = t.bool;
           environment = t.attrsOf scalar;
           path = t.listOf (
             t.union [
@@ -139,6 +142,8 @@ let
   unitSection =
     def:
     lib.optionalAttrs (def ? description) { Description = def.description; }
+    # Read by flakelet like NixOS' switch-to-configuration reads it.
+    // lib.optionalAttrs (!(def.restartIfChanged or true)) { X-RestartIfChanged = false; }
     // lib.optionalAttrs (def ? documentation) { Documentation = def.documentation; }
     // lib.concatMapAttrs (opt: key: lib.optionalAttrs (def ? ${opt}) { ${key} = def.${opt}; }) unitKeys
     // (def.unitConfig or { });
@@ -151,20 +156,41 @@ let
   # `services.<name>` keeps the entry name, everything else is prefixed, which
   # makes the flakelet multi-instance capable and satisfies flakelet's rule
   # that unit names start with the entry name.
-  unitName = key: if key == name then name else "${name}-${key}";
+  unitName =
+    key:
+    if key == name then
+      name
+    else if key == "@" then
+      "${name}@"
+    else
+      "${name}-${key}";
+  isTemplate = lib.hasSuffix "@";
+  instanceName = i: builtins.match "[A-Za-z0-9:_.\\-]+" i != null;
 
   renderGroup =
     suffix: extraSections: defs:
-    lib.mapAttrs' (
+    lib.concatMapAttrs (
       key: def:
       let
-        file = "${unitName key}${suffix}";
+        base = unitName key;
+        file = "${base}${suffix}";
+        instances = def.instances or [ ];
+        # systemd takes the unit name from the resolved file, and store path
+        # names cannot contain "@", so the file sits inside a directory.
+        drv = pkgs.writeTextFile {
+          name = lib.replaceStrings [ "@" ] [ "_" ] file;
+          destination = "/${file}";
+          text = section "Unit" (unitSection def) + extraSections def + section "Install" (installSection def);
+        };
+        path = "${drv}/${file}";
       in
-      lib.nameValuePair file (
-        pkgs.writeText file (
-          section "Unit" (unitSection def) + extraSections def + section "Install" (installSection def)
-        )
-      )
+      if instances != [ ] && !isTemplate key then
+        fail "${file}: instances needs a template unit (name ending in @)"
+      else if !lib.all instanceName instances then
+        fail "${file}: invalid instance name in ${builtins.toJSON instances}"
+      else
+        { ${file} = path; }
+        // lib.listToAttrs (map (i: lib.nameValuePair "${base}${i}${suffix}" path) instances)
     ) defs;
 
   serviceSection =
