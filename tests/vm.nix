@@ -80,7 +80,6 @@ let
               };
               # A generator decides at daemon-reload how many instances exist.
               generators.echo = pkgs.writeShellScript "gen" ''
-                export PATH=${pkgs.coreutils}/bin
                 mkdir -p "$1/sockets.target.wants"
                 ln -s /run/systemd/system/${name}-echo@.socket "$1/sockets.target.wants/${name}-echo@3.socket"
               '';

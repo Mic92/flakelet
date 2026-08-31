@@ -387,7 +387,11 @@ rec {
           if builtins.match "[A-Za-z0-9_-]+" g == null then
             fail "generator name ${g} must match [A-Za-z0-9_-]+"
           else
-            lib.nameValuePair "${name}-${g}" "${exe}"
+            # systemd runs generators with an empty environment.
+            lib.nameValuePair "${name}-${g}" "${pkgs.writeShellScript "${name}-${g}" ''
+              export PATH=${lib.makeBinPath [ pkgs.coreutils ]}
+              exec ${exe} "$@"
+            ''}"
         ) (a.generators or { });
         state = deriveState services (a.exports.state or { });
       }

@@ -176,7 +176,14 @@ pub fn start(units: &Units, block: bool) -> Result<()> {
         start.push("--no-block");
     }
     start.extend(installed.iter().map(String::as_str));
-    systemctl(&start)
+    systemctl(&start).map_err(|e| match (e, failed(units)) {
+        (Error::Command { program, args, .. }, Ok(f)) if !f.is_empty() => Error::Command {
+            program,
+            args,
+            stderr: format!("failed units: {}. See journalctl -u {}", f.join(" "), f[0]),
+        },
+        (e, _) => e,
+    })
 }
 
 /// Link the unit files and make systemd load them, without starting.
@@ -260,12 +267,33 @@ pub fn start_oneshot(unit: &str) -> Result<bool> {
     Ok(status.success())
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnitState {
+    pub unit: String,
+    /// ActiveState, e.g. active, inactive, failed.
+    pub active: String,
+    /// SubState, e.g. running, listening, dead.
+    pub sub: String,
+}
+
+/// State of every concrete unit of the service, template instances included.
+pub fn states(units: &Units) -> Result<Vec<UnitState>> {
+    let names = concrete(units)?;
+    let active = show(&names, "ActiveState")?;
+    let sub = show(&names, "SubState")?;
+    Ok(active
+        .into_iter()
+        .zip(sub)
+        .map(|((unit, active), (_, sub))| UnitState { unit, active, sub })
+        .collect())
+}
+
 /// Units of the service that are in failed state.
 pub fn failed(units: &Units) -> Result<Vec<String>> {
-    Ok(show(&concrete(units)?, "ActiveState")?
+    Ok(states(units)?
         .into_iter()
-        .filter(|(_, s)| s == "failed")
-        .map(|(u, _)| u)
+        .filter(|s| s.active == "failed")
+        .map(|s| s.unit)
         .collect())
 }
 

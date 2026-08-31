@@ -293,7 +293,7 @@ assert
 assert templated.units."web-agent@1.socket" == templated.units."web-agent@.socket";
 # systemd derives unit names from the file a symlink resolves to.
 assert baseNameOf templated.units."web-agent@.socket" == "web-agent@.socket";
-assert templated.generators == { "web-agents" = "/bin/gen"; };
+assert lib.attrNames templated.generators == [ "web-agents" ];
 assert fails (
   flakeletLib.render {
     services.web.serviceConfig.ExecStart = "x";

@@ -141,12 +141,11 @@ This renders `<name>-worker@.socket` once and links
 
 To size the instance count per machine, ship a
 [systemd generator](https://www.freedesktop.org/software/systemd/man/systemd.generator.html)
-instead of `instances`. It runs on every `daemon-reload` with an empty
-environment:
+instead of `instances`. It runs on every `daemon-reload` with only
+coreutils in `PATH`:
 
 ```nix
 generators.workers = pkgs.writeShellScript "workers" ''
-  PATH=${pkgs.coreutils}/bin
   mkdir -p "$1/sockets.target.wants"
   for i in $(seq "$(nproc)"); do
     ln -s /run/systemd/system/${name}-worker@.socket "$1/sockets.target.wants/${name}-worker@$i.socket"
