@@ -121,6 +121,22 @@ let
     exports.state.extraFolders = [ "/srv/media" ];
   };
 
+  templated = flakeletLib.render {
+    services.web.serviceConfig.ExecStart = "/bin/false";
+    sockets."agent@" = {
+      wantedBy = [ "sockets.target" ];
+      instances = [
+        "1"
+        "2"
+      ];
+      socketConfig.ListenStream = "/run/web/%i.sock";
+    };
+    services."agent@" = {
+      restartIfChanged = false;
+      serviceConfig.ExecStart = "/bin/agent %i";
+    };
+  };
+
   # storePath turns a context-free store path string into a real dependency.
   helloPath = flakeletLib.storePath (builtins.unsafeDiscardStringContext "${hello}");
 in
@@ -265,7 +281,38 @@ assert
     "web.socket"
   ];
 assert !(result ? healthCheck);
-runCommand "flakelet-lib-test" { units = linkFarm "flakelet-lib-test-units" result.units; } ''
+assert
+  lib.attrNames templated.units == [
+    "web-agent@.service"
+    "web-agent@.socket"
+    "web-agent@1.socket"
+    "web-agent@2.socket"
+    "web.service"
+  ];
+assert templated.units."web-agent@1.socket" == templated.units."web-agent@.socket";
+# systemd derives unit names from the file a symlink resolves to.
+assert baseNameOf templated.units."web-agent@.socket" == "web-agent@.socket";
+# instances only make sense on templates, restartIfChanged only on services
+assert fails (
+  flakeletLib.render {
+    services.web = {
+      serviceConfig.ExecStart = "x";
+      instances = [ "1" ];
+    };
+  }
+);
+assert fails (
+  flakeletLib.render {
+    services.web.serviceConfig.ExecStart = "x";
+    sockets."a@".instances = [ "x/y" ];
+  }
+);
+runCommand "flakelet-lib-test"
+  {
+    units = linkFarm "flakelet-lib-test-units" result.units;
+    templated = linkFarm "flakelet-lib-test-templated" templated.units;
+  }
+  ''
   s=$units/web.service
   grep -qx 'Description=demo web service' $s
   grep -qx 'After=network.target' $s
@@ -297,5 +344,8 @@ runCommand "flakelet-lib-test" { units = linkFarm "flakelet-lib-test-units" resu
   grep -qx 'DynamicUser=true' $d
   grep -qx 'StateDirectory=web web/sub alias:link' $d
   if grep -q 'Install' $d; then exit 1; fi
+  a=$templated/web-agent@.service
+  grep -qx 'X-RestartIfChanged=false' $a
+  grep -qx 'ExecStart=/bin/agent %i' $a
   touch $out
 ''

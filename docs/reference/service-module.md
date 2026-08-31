@@ -96,10 +96,13 @@ exclusive with defining the corresponding `services.<key>` yourself.
 ## Activation semantics
 
 - All units of the previous generation are stopped in one job, disabled
-  and unlinked before the new ones are linked.
+  and unlinked before the new ones are linked. For templates that means
+  every loaded instance. Units with `restartIfChanged = false` that exist
+  in both generations are skipped here. `remove` stops them regardless.
 - `failed` states are reset, then units with an `[Install]` section are
-  enabled and started.
-- Units without one are left to socket/timer/dependency activation.
+  enabled and started, including listed `instances`.
+- Units without one, and template instances not in `instances`, are left
+  to socket/timer/dependency activation.
 - After switching, `<name>-health.service` is started if present. A failed
   start job, or any unit of the entry in `failed` state, rolls back.
 - `<name>-dump.service` / `<name>-restore.service` are never started by
