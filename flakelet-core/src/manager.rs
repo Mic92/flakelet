@@ -1329,6 +1329,20 @@ fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     }
     let host_dirs: Vec<PathBuf> = HOST_UNIT_DIRS.iter().map(PathBuf::from).collect();
     validate_units(name, &artifact.units, &host_dirs)?;
+    // Generators travel with the units so switch and remove handle them.
+    let gen_dir = artifact.out.join("generators");
+    for entry in fs::read_dir(&gen_dir).into_iter().flatten().flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if !file.starts_with(&format!("{name}-")) || file.contains('.') {
+            return Err(Error::InvalidUnitName {
+                service: name.into(),
+                unit: file,
+            });
+        }
+        let target = fs::canonicalize(entry.path())
+            .map_err(Error::io(format!("read {}", gen_dir.display())))?;
+        artifact.units.insert(file, target);
+    }
     artifact.exports = match fs::read_to_string(artifact.out.join("exports.json")) {
         Ok(data) => serde_json::from_str(&data)
             .map_err(Error::json(format!("corrupt exports.json of {name}")))?,

@@ -135,6 +135,7 @@ let
       restartIfChanged = false;
       serviceConfig.ExecStart = "/bin/agent %i";
     };
+    generators.agents = "/bin/gen";
   };
 
   # storePath turns a context-free store path string into a real dependency.
@@ -292,6 +293,13 @@ assert
 assert templated.units."web-agent@1.socket" == templated.units."web-agent@.socket";
 # systemd derives unit names from the file a symlink resolves to.
 assert baseNameOf templated.units."web-agent@.socket" == "web-agent@.socket";
+assert templated.generators == { "web-agents" = "/bin/gen"; };
+assert fails (
+  flakeletLib.render {
+    services.web.serviceConfig.ExecStart = "x";
+    generators."a.b" = "/bin/gen";
+  }
+);
 # instances only make sense on templates, restartIfChanged only on services
 assert fails (
   flakeletLib.render {

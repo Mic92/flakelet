@@ -11,9 +11,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const RUNTIME_UNIT_DIR: &str = "/run/systemd/system";
+const GENERATOR_DIR: &str = "/run/systemd/system-generators";
 
-/// Map of unit name -> unit file store path.
+/// Map of unit name -> unit file store path. Entries without a `.` are
+/// systemd generators.
 pub type Units = BTreeMap<String, PathBuf>;
+
+fn is_generator(unit: &str) -> bool {
+    !unit.contains('.')
+}
+
+fn link_dir(unit: &str) -> &'static Path {
+    Path::new(if is_generator(unit) {
+        GENERATOR_DIR
+    } else {
+        RUNTIME_UNIT_DIR
+    })
+}
 
 /// `foo@.service` cannot be started or queried itself, only linked.
 fn is_template(unit: &str) -> bool {
@@ -33,7 +47,7 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
     // Units present in both with X-RestartIfChanged=false keep running,
     // and so does their socket, which could not restart while they do.
     let mut keep = BTreeSet::new();
-    for (unit, path) in new {
+    for (unit, path) in new.iter().filter(|(u, _)| !is_generator(u)) {
         if old.contains_key(unit) && !UnitFile::read(unit, path)?.restart_if_changed {
             let socket = unit.replace(".service", ".socket");
             if new.contains_key(&socket) {
@@ -80,7 +94,7 @@ pub fn remove(units: &Units) -> Result<()> {
             .output();
     }
     for unit in units.keys() {
-        match fs::remove_file(Path::new(RUNTIME_UNIT_DIR).join(unit)) {
+        match fs::remove_file(link_dir(unit).join(unit)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(Error::io(format!("unlink unit {unit}"))(e))
             }
@@ -105,23 +119,34 @@ pub fn start(units: &Units, block: bool) -> Result<()> {
         .args(concrete(units)?)
         .output();
 
+    // Instances of an installable template count too, including those a
+    // generator hooked in during the reload above.
     let mut installed = Vec::new();
     for (unit, path) in units {
-        if !is_template(unit) && UnitFile::read(unit, path)?.install {
-            installed.push(unit.as_str());
+        if is_generator(unit) || !UnitFile::read(unit, path)?.install {
+            continue;
+        }
+        if is_template(unit) {
+            installed.extend(
+                instances(unit)?
+                    .into_iter()
+                    .filter(|i| !units.contains_key(i)),
+            );
+        } else {
+            installed.push(unit.clone());
         }
     }
     if installed.is_empty() {
         return Ok(());
     }
     let mut enable = vec!["enable", "--runtime"];
-    enable.extend(&installed);
+    enable.extend(installed.iter().map(String::as_str));
     systemctl(&enable)?;
     let mut start = vec!["start"];
     if !block {
         start.push("--no-block");
     }
-    start.extend(&installed);
+    start.extend(installed.iter().map(String::as_str));
     systemctl(&start)
 }
 
@@ -138,6 +163,9 @@ pub fn load(units: &Units) -> Result<()> {
 fn concrete(units: &Units) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for unit in units.keys() {
+        if is_generator(unit) {
+            continue;
+        }
         if is_template(unit) {
             for i in instances(unit)? {
                 if !units.contains_key(&i) {
@@ -236,7 +264,7 @@ fn show(units: &[String], property: &str) -> Result<Vec<(String, String)>> {
 
 fn link(unit: &str, target: &PathBuf) -> Result<()> {
     let context = || format!("link unit {unit}");
-    let dir = Path::new(RUNTIME_UNIT_DIR);
+    let dir = link_dir(unit);
     fs::create_dir_all(dir).map_err(Error::io(context()))?;
     let tmp = dir.join(format!(".{unit}.tmp"));
     let _ = fs::remove_file(&tmp);

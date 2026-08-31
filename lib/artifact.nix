@@ -43,6 +43,9 @@ pkgs.linkFarm "flakelet-${name}" (
     "state.json" = json "state.json" evaluated.state;
     units = pkgs.linkFarm "flakelet-${name}-units" evaluated.units;
   }
+  // pkgs.lib.optionalAttrs (evaluated.generators != { }) {
+    generators = pkgs.linkFarm "flakelet-${name}-generators" evaluated.generators;
+  }
   // pkgs.lib.optionalAttrs (evaluated ? exports) {
     "exports.json" = json "exports.json" (resolveExports evaluated.exports);
   }
