@@ -47,6 +47,7 @@ All keys optional. Unknown keys are errors. At least one unit must result.
 | `timers`        | attrsOf *unit* + `timerConfig`        |
 | `targets`       | attrsOf *unit*                        |
 | `paths`         | attrsOf *unit* + `pathConfig`         |
+| `generators`    | attrsOf string or derivation (executable), see [Generators](../guides/writing-a-service.md#generators) |
 | `healthCheck`   | string or derivation (executable path) |
 | `dumpScript`    | string or derivation                  |
 | `restoreScript` | string or derivation                  |
@@ -103,6 +104,9 @@ exclusive with defining the corresponding `services.<key>` yourself.
   enabled and started, including listed `instances`.
 - Units without one, and template instances not in `instances`, are left
   to socket/timer/dependency activation.
+- `generators.<g>` is linked to `/run/systemd/system-generators/<name>-<g>`
+  and runs on the same `daemon-reload`. Every instance systemd then knows
+  of a template with an `[Install]` section is started.
 - After switching, `<name>-health.service` is started if present. A failed
   start job, or any unit of the entry in `failed` state, rolls back.
 - `<name>-dump.service` / `<name>-restore.service` are never started by
@@ -127,6 +131,7 @@ Written to `state.json` in the artifact, from `serviceConfig` only:
 /nix/store/…-flakelet-<name>/
   meta.json      schema version, name, flake_url, rev, settings hash
   units/         rendered unit files
+  generators/    optional, <name>-<g> executables
   exports.json   optional
   state.json     folders, owners, dump/restore unit names
 ```

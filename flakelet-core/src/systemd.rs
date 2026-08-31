@@ -4,16 +4,30 @@
 //! The exception is `X-RestartIfChanged=false`, for units whose running
 //! instances must drain (build agents).
 use crate::error::{Error, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const RUNTIME_UNIT_DIR: &str = "/run/systemd/system";
+const GENERATOR_DIR: &str = "/run/systemd/system-generators";
 
-/// Map of unit name -> unit file store path.
+/// Map of unit name -> unit file store path. Entries without a `.` are
+/// systemd generators.
 pub type Units = BTreeMap<String, PathBuf>;
+
+fn is_generator(unit: &str) -> bool {
+    !unit.contains('.')
+}
+
+fn link_dir(unit: &str) -> &'static Path {
+    Path::new(if is_generator(unit) {
+        GENERATOR_DIR
+    } else {
+        RUNTIME_UNIT_DIR
+    })
+}
 
 /// `foo@.service` cannot be started or queried itself, only linked.
 fn is_template(unit: &str) -> bool {
@@ -30,45 +44,68 @@ pub(crate) fn template_of(unit: &str) -> Option<String> {
 /// Replace `old` by `new`. Everything of `old` is stopped and unlinked
 /// before anything of `new` starts, so ports and sockets are free.
 pub fn switch(old: &Units, new: &Units) -> Result<()> {
-    // Units present in both with X-RestartIfChanged=false keep running,
-    // and so does their socket, which could not restart while they do.
-    let mut keep = BTreeSet::new();
-    for (unit, path) in new {
-        if old.contains_key(unit) && !UnitFile::read(unit, path)?.restart_if_changed {
-            let socket = unit.replace(".service", ".socket");
-            if new.contains_key(&socket) {
-                keep.insert(socket);
-            }
-            keep.insert(unit.clone());
+    // Running X-RestartIfChanged=false services present in both keep
+    // running, and so does their socket, which could not restart while
+    // they do.
+    let mut keep = Vec::new();
+    for (unit, path) in new.iter().filter(|(u, _)| u.ends_with(".service")) {
+        if !old.contains_key(unit) || UnitFile::read(unit, path)?.restart_if_changed {
+            continue;
+        }
+        let names = if is_template(unit) {
+            instances(unit)?
+        } else {
+            vec![unit.clone()]
+        };
+        for (service, _) in show(&names, "ActiveState")?
+            .into_iter()
+            .filter(|(_, s)| s != "inactive" && s != "failed")
+        {
+            keep.push(service.replace(".service", ".socket"));
+            keep.push(service);
         }
     }
-    let stale: Units = old
-        .iter()
-        .filter(|(u, _)| !keep.contains(*u) && !template_of(u).is_some_and(|t| keep.contains(&t)))
-        .map(|(u, p)| (u.clone(), p.clone()))
-        .collect();
-    remove(&stale)?;
+    remove_except(old, &keep)?;
     start(new, true)
 }
 
-/// Stop all loaded units in one job so sockets and timers cannot
-/// re-trigger the service. Links stay in place.
+/// Stop all loaded units. Links stay in place.
 pub fn stop(units: &Units) -> Result<()> {
-    let loaded = loaded(units)?;
-    if loaded.is_empty() {
-        return Ok(());
+    stop_except(units, &[])
+}
+
+fn stop_except(units: &Units, keep: &[String]) -> Result<()> {
+    let stop: Vec<String> = loaded(units)?
+        .into_iter()
+        .filter(|u| !keep.contains(u))
+        .collect();
+    // Triggers first: in a single job systemd stops the service before its
+    // socket, and a pending connection re-activates it in between.
+    let (triggers, rest): (Vec<_>, Vec<_>) = stop
+        .iter()
+        .map(String::as_str)
+        .partition(|u| u.ends_with(".socket") || u.ends_with(".timer") || u.ends_with(".path"));
+    for batch in [triggers, rest] {
+        if !batch.is_empty() {
+            let mut args = vec!["stop"];
+            args.extend(batch);
+            systemctl(&args)?;
+        }
     }
-    let mut args = vec!["stop"];
-    args.extend(loaded.iter().map(String::as_str));
-    systemctl(&args)
+    Ok(())
 }
 
 /// Stop, disable and unlink all units.
 pub fn remove(units: &Units) -> Result<()> {
+    remove_except(units, &[])
+}
+
+fn remove_except(units: &Units, keep: &[String]) -> Result<()> {
     if units.is_empty() {
         return Ok(());
     }
-    stop(units)?;
+    stop_except(units, keep)?;
+    // Kept units are disabled too so WantedBy reflects the new generation.
     let loaded = loaded(units)?;
     if !loaded.is_empty() {
         let mut args = vec!["disable", "--runtime"];
@@ -80,7 +117,7 @@ pub fn remove(units: &Units) -> Result<()> {
             .output();
     }
     for unit in units.keys() {
-        match fs::remove_file(Path::new(RUNTIME_UNIT_DIR).join(unit)) {
+        match fs::remove_file(link_dir(unit).join(unit)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(Error::io(format!("unlink unit {unit}"))(e))
             }
@@ -106,23 +143,47 @@ pub fn start(units: &Units, block: bool) -> Result<()> {
         .output();
 
     let mut installed = Vec::new();
+    let mut generated = Vec::new();
     for (unit, path) in units {
-        if !is_template(unit) && UnitFile::read(unit, path)?.install {
-            installed.push(unit.as_str());
+        if is_generator(unit) || !UnitFile::read(unit, path)?.install {
+            continue;
+        }
+        if !is_template(unit) {
+            installed.push(unit.clone());
+            continue;
+        }
+        // Instances a generator hooked into a target during the reload.
+        for i in instances(unit)?
+            .into_iter()
+            .filter(|i| !units.contains_key(i))
+        {
+            if !show(std::slice::from_ref(&i), "WantedBy,RequiredBy")?.is_empty() {
+                generated.push(i);
+            }
         }
     }
+    if !installed.is_empty() {
+        let mut enable = vec!["enable", "--runtime"];
+        enable.extend(installed.iter().map(String::as_str));
+        systemctl(&enable)?;
+    }
+    installed.extend(generated);
     if installed.is_empty() {
         return Ok(());
     }
-    let mut enable = vec!["enable", "--runtime"];
-    enable.extend(&installed);
-    systemctl(&enable)?;
     let mut start = vec!["start"];
     if !block {
         start.push("--no-block");
     }
-    start.extend(&installed);
-    systemctl(&start)
+    start.extend(installed.iter().map(String::as_str));
+    systemctl(&start).map_err(|e| match (e, failed(units)) {
+        (Error::Command { program, args, .. }, Ok(f)) if !f.is_empty() => Error::Command {
+            program,
+            args,
+            stderr: format!("failed units: {}. See journalctl -u {}", f.join(" "), f[0]),
+        },
+        (e, _) => e,
+    })
 }
 
 /// Link the unit files and make systemd load them, without starting.
@@ -138,6 +199,9 @@ pub fn load(units: &Units) -> Result<()> {
 fn concrete(units: &Units) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for unit in units.keys() {
+        if is_generator(unit) {
+            continue;
+        }
         if is_template(unit) {
             for i in instances(unit)? {
                 if !units.contains_key(&i) {
@@ -203,12 +267,33 @@ pub fn start_oneshot(unit: &str) -> Result<bool> {
     Ok(status.success())
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnitState {
+    pub unit: String,
+    /// ActiveState, e.g. active, inactive, failed.
+    pub active: String,
+    /// SubState, e.g. running, listening, dead.
+    pub sub: String,
+}
+
+/// State of every concrete unit of the service, template instances included.
+pub fn states(units: &Units) -> Result<Vec<UnitState>> {
+    let names = concrete(units)?;
+    let active = show(&names, "ActiveState")?;
+    let sub = show(&names, "SubState")?;
+    Ok(active
+        .into_iter()
+        .zip(sub)
+        .map(|((unit, active), (_, sub))| UnitState { unit, active, sub })
+        .collect())
+}
+
 /// Units of the service that are in failed state.
 pub fn failed(units: &Units) -> Result<Vec<String>> {
-    Ok(show(&concrete(units)?, "ActiveState")?
+    Ok(states(units)?
         .into_iter()
-        .filter(|(_, s)| s == "failed")
-        .map(|(u, _)| u)
+        .filter(|s| s.active == "failed")
+        .map(|s| s.unit)
         .collect())
 }
 
@@ -236,7 +321,7 @@ fn show(units: &[String], property: &str) -> Result<Vec<(String, String)>> {
 
 fn link(unit: &str, target: &PathBuf) -> Result<()> {
     let context = || format!("link unit {unit}");
-    let dir = Path::new(RUNTIME_UNIT_DIR);
+    let dir = link_dir(unit);
     fs::create_dir_all(dir).map_err(Error::io(context()))?;
     let tmp = dir.join(format!(".{unit}.tmp"));
     let _ = fs::remove_file(&tmp);

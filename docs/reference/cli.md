@@ -25,7 +25,7 @@ same information with examples.
 
 | command | does |
 | ------- | ---- |
-| `status [<name>…] [--json]` | generation, revision, held/degraded/disabled, lock holder, `export_blockers`, missing providers |
+| `status [<name>…] [--json]` | generation, revision, held/degraded/disabled, lock holder, `export_blockers`, missing providers. With names also each unit and template instance with its state |
 | `diff <name> [--no-refresh]` | `nix store diff-closures` between running generation and a fresh evaluation |
 | `driver [<name>…] [--machine <m> [--flake <ref>]]` | print the generated driver expression |
 
