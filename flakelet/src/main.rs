@@ -827,6 +827,11 @@ fn print_status(mgr: &Manager, json: bool, names: &[String]) -> Result<()> {
         if !s.failed_units.is_empty() {
             println!("\tfailed: {}", s.failed_units.join(" "));
         }
+        if !names.is_empty() {
+            for u in &s.unit_states {
+                println!("\t{}\t{} ({})", u.unit, u.active, u.sub);
+            }
+        }
         for claim in &s.missing_providers {
             eprintln!("{}: warning: no provider announces '{claim}'", s.name);
         }

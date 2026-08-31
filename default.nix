@@ -7,6 +7,8 @@
   gnutar,
   zstd,
   getent,
+  gitMinimal,
+  openssh,
 }:
 
 rustPlatform.buildRustPackage {
@@ -26,7 +28,8 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # systemctl and chown come from the host.
+  # systemctl and chown come from the host. git/ssh are suffixed so a
+  # host git still wins.
   postInstall = ''
     wrapProgram $out/bin/flakelet \
       --prefix PATH : ${
@@ -36,6 +39,12 @@ rustPlatform.buildRustPackage {
           gnutar
           zstd
           getent
+        ]
+      } \
+      --suffix PATH : ${
+        lib.makeBinPath [
+          gitMinimal
+          openssh
         ]
       }
   '';

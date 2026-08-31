@@ -110,6 +110,7 @@ let
       timers = t.attrsOf (unitType "timer" { timerConfig = configSection; });
       targets = t.attrsOf (unitType "target" { });
       paths = t.attrsOf (unitType "path" { pathConfig = configSection; });
+      generators = t.attrsOf script;
       healthCheck = script;
       dumpScript = script;
       restoreScript = script;
@@ -381,6 +382,17 @@ rec {
     else
       {
         inherit units;
+        generators = lib.mapAttrs' (
+          g: exe:
+          if builtins.match "[A-Za-z0-9_-]+" g == null then
+            fail "generator name ${g} must match [A-Za-z0-9_-]+"
+          else
+            # systemd runs generators with an empty environment.
+            lib.nameValuePair "${name}-${g}" "${pkgs.writeShellScript "${name}-${g}" ''
+              export PATH=${lib.makeBinPath [ pkgs.coreutils ]}
+              exec ${exe} "$@"
+            ''}"
+        ) (a.generators or { });
         state = deriveState services (a.exports.state or { });
       }
       // lib.optionalAttrs (a ? exports) { inherit (a) exports; };

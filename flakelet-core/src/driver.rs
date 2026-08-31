@@ -18,7 +18,7 @@ pub struct DriverEntry<'a> {
 
 /// Render the driver expression that is added to the store and evaluated with
 /// nix-eval-jobs. Each attribute builds a self-describing artifact:
-/// meta.json, state.json, units/<unit files> and optional exports.json.
+/// see lib/artifact.nix.
 pub fn render(config: &Config, entries: &[DriverEntry]) -> String {
     let system = config.system.as_str();
     let nixpkgs = config
@@ -32,16 +32,6 @@ pub fn render(config: &Config, entries: &[DriverEntry]) -> String {
         "  pkgs = import {nixpkgs} {{ system = {}; }};",
         nix_string(system)
     );
-    // Derivations in exports become their out paths, so consumers of the
-    // published exports.json execute store paths of the running generation.
-    out.push_str(
-        r#"  resolveExports = v:
-    if builtins.isAttrs v then
-      (if v ? type && v.type == "derivation" then "${v}" else builtins.mapAttrs (_: resolveExports) v)
-    else if builtins.isList v then map resolveExports v
-    else v;
-"#,
-    );
     let _ = writeln!(out, "in {{");
     for e in entries {
         let extra_modules = config
@@ -50,8 +40,6 @@ pub fn render(config: &Config, entries: &[DriverEntry]) -> String {
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
             .join(" ");
-        // With a nixpkgs override the module gets its own pkgs instance; the
-        // artifact linkFarm still uses the shared (host) pkgs.
         let entry_pkgs = match e.nixpkgs_override {
             Some(url) => format!(
                 "import (builtins.getFlake {}).outPath {{ system = {}; }}",
@@ -65,44 +53,25 @@ pub fn render(config: &Config, entries: &[DriverEntry]) -> String {
             (Some(lib), Some(adios)) => (lib, adios),
             _ => panic!("driver requires flakelet_lib and adios in the config"),
         };
-        let meta = serde_json::json!({
-            "version": 1,
-            "name": e.name,
-            "flake_url": e.locked_url,
-            "flake_rev": e.locked_rev,
-            "settings_hash": e.settings_hash,
-        });
         let _ = writeln!(
             out,
-            r#"  {attr} =
-    let
-      entryPkgs = {entry_pkgs};
-      entrySettings = {settings};
-      flakeletLib = import {lib_path} {{ pkgs = entryPkgs; name = {name}; adios = {adios}; }};
-      module = flakeletLib.evalModule (builtins.getFlake {url}).{output} {{
-        settings = entrySettings;
-        extraModules = [ {extra_modules} ];
-      }};
-    in
-    pkgs.linkFarm "flakelet-{raw_name}" ({{
-      "meta.json" = pkgs.writeText "flakelet-{raw_name}-meta.json" {meta};
-      "state.json" = pkgs.writeText "flakelet-{raw_name}-state.json" (builtins.toJSON module.state);
-      units = pkgs.linkFarm "flakelet-{raw_name}-units" module.units;
-    }}
-    // (if module ? exports then {{
-      "exports.json" = pkgs.writeText "flakelet-{raw_name}-exports.json"
-        (builtins.toJSON (resolveExports module.exports));
-    }} else {{ }}));"#,
+            r#"  {attr} = import {lib_path}/artifact.nix {{ pkgs = {entry_pkgs}; adios = {adios}; }} {{
+    name = {attr};
+    module = (builtins.getFlake {url}).{output};
+    settings = {settings};
+    extraModules = [ {extra_modules} ];
+    flakeUrl = {url};
+    flakeRev = {rev};
+    settingsHash = {hash};
+  }};"#,
             attr = nix_string(e.name),
             url = nix_string(e.locked_url),
+            rev = nix_string(e.locked_rev),
+            hash = nix_string(e.settings_hash),
             output = e.output,
-            entry_pkgs = entry_pkgs,
             lib_path = lib_path.display(),
             adios = adios.display(),
-            name = nix_string(e.name),
             settings = json_to_nix(e.settings),
-            meta = nix_string(&meta.to_string()),
-            raw_name = e.name,
         );
     }
     out.push_str("}\n");
@@ -184,14 +153,12 @@ mod tests {
         assert!(
             expr.contains(r#"builtins.getFlake "github:me/grafana-svc/abc?narHash=sha256-xyz""#)
         );
-        assert!(expr.contains(r#"entrySettings = { "port" = 3000; };"#));
+        assert!(expr.contains(r#"settings = { "port" = 3000; };"#));
         assert!(expr.contains(
-            r#"flakeletLib = import /nix/store/ccc-flakelet-lib { pkgs = entryPkgs; name = "grafana"; adios = /nix/store/bbb-adios; };"#
+            r#"import /nix/store/ccc-flakelet-lib/artifact.nix { pkgs = pkgs; adios = /nix/store/bbb-adios; }"#
         ));
-        assert!(expr.contains("flakeletLib.evalModule (builtins.getFlake"));
-        assert!(expr.contains("settings = entrySettings;"));
-        assert!(expr.contains("entryPkgs = pkgs;"));
-        assert!(expr.contains(r#"\"settings_hash\":\"deadbeef\""#));
+        assert!(expr.contains(r#"module = (builtins.getFlake "github:me/grafana-svc/abc?narHash=sha256-xyz").flakelets.default;"#));
+        assert!(expr.contains(r#"settingsHash = "deadbeef";"#));
     }
 
     #[test]
@@ -216,11 +183,8 @@ mod tests {
                 nixpkgs_override: Some("github:NixOS/nixpkgs/def?narHash=sha256-npk"),
             }],
         );
-        // The module gets its own pkgs from the override...
         assert!(expr.contains(
-            r#"entryPkgs = import (builtins.getFlake "github:NixOS/nixpkgs/def?narHash=sha256-npk").outPath { system = "x86_64-linux"; };"#
+            r#"pkgs = import (builtins.getFlake "github:NixOS/nixpkgs/def?narHash=sha256-npk").outPath { system = "x86_64-linux"; };"#
         ));
-        // ...while the shared (host) pkgs still exists for the artifact linkFarm.
-        assert!(expr.contains("pkgs = import /nix/store/aaa-source"));
     }
 }

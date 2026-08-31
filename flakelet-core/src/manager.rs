@@ -96,6 +96,7 @@ pub struct ServiceStatus {
     pub last_error: Option<String>,
     pub updating: bool,
     pub failed_units: Vec<String>,
+    pub unit_states: Vec<systemd::UnitState>,
     pub missing_providers: Vec<String>,
     pub state: Option<StateInfo>,
     pub export_blockers: Vec<String>,
@@ -118,6 +119,7 @@ impl ServiceStatus {
             last_error: None,
             updating: false,
             failed_units: Vec::new(),
+            unit_states: Vec::new(),
             missing_providers: Vec::new(),
             state: None,
             export_blockers: Vec::new(),
@@ -358,7 +360,13 @@ impl Manager {
                 Ok(cur) => {
                     status.export_blockers = self.export_blockers(&st, cur.as_ref());
                     if let Some(m) = cur {
-                        status.failed_units = systemd::failed(&m.units).unwrap_or_default();
+                        status.unit_states = systemd::states(&m.units).unwrap_or_default();
+                        status.failed_units = status
+                            .unit_states
+                            .iter()
+                            .filter(|s| s.active == "failed")
+                            .map(|s| s.unit.clone())
+                            .collect();
                         status.missing_providers =
                             exports::unannounced_claims(&m.exports, &self.config.providers_dir);
                         status.units = m.units;
@@ -1329,6 +1337,20 @@ fn read_contents(name: &str, artifact: &mut Artifact) -> Result<()> {
     }
     let host_dirs: Vec<PathBuf> = HOST_UNIT_DIRS.iter().map(PathBuf::from).collect();
     validate_units(name, &artifact.units, &host_dirs)?;
+    // Generators travel with the units so switch and remove handle them.
+    let gen_dir = artifact.out.join("generators");
+    for entry in fs::read_dir(&gen_dir).into_iter().flatten().flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if !file.starts_with(&format!("{name}-")) || file.contains('.') {
+            return Err(Error::InvalidUnitName {
+                service: name.into(),
+                unit: file,
+            });
+        }
+        let target = fs::canonicalize(entry.path())
+            .map_err(Error::io(format!("read {}", gen_dir.display())))?;
+        artifact.units.insert(file, target);
+    }
     artifact.exports = match fs::read_to_string(artifact.out.join("exports.json")) {
         Ok(data) => serde_json::from_str(&data)
             .map_err(Error::json(format!("corrupt exports.json of {name}")))?,
