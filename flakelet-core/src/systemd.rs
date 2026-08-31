@@ -4,7 +4,7 @@
 //! The exception is `X-RestartIfChanged=false`, for units whose running
 //! instances must drain (build agents).
 use crate::error::{Error, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -44,45 +44,68 @@ pub(crate) fn template_of(unit: &str) -> Option<String> {
 /// Replace `old` by `new`. Everything of `old` is stopped and unlinked
 /// before anything of `new` starts, so ports and sockets are free.
 pub fn switch(old: &Units, new: &Units) -> Result<()> {
-    // Units present in both with X-RestartIfChanged=false keep running,
-    // and so does their socket, which could not restart while they do.
-    let mut keep = BTreeSet::new();
-    for (unit, path) in new.iter().filter(|(u, _)| !is_generator(u)) {
-        if old.contains_key(unit) && !UnitFile::read(unit, path)?.restart_if_changed {
-            let socket = unit.replace(".service", ".socket");
-            if new.contains_key(&socket) {
-                keep.insert(socket);
-            }
-            keep.insert(unit.clone());
+    // Running X-RestartIfChanged=false services present in both keep
+    // running, and so does their socket, which could not restart while
+    // they do.
+    let mut keep = Vec::new();
+    for (unit, path) in new.iter().filter(|(u, _)| u.ends_with(".service")) {
+        if !old.contains_key(unit) || UnitFile::read(unit, path)?.restart_if_changed {
+            continue;
+        }
+        let names = if is_template(unit) {
+            instances(unit)?
+        } else {
+            vec![unit.clone()]
+        };
+        for (service, _) in show(&names, "ActiveState")?
+            .into_iter()
+            .filter(|(_, s)| s != "inactive" && s != "failed")
+        {
+            keep.push(service.replace(".service", ".socket"));
+            keep.push(service);
         }
     }
-    let stale: Units = old
-        .iter()
-        .filter(|(u, _)| !keep.contains(*u) && !template_of(u).is_some_and(|t| keep.contains(&t)))
-        .map(|(u, p)| (u.clone(), p.clone()))
-        .collect();
-    remove(&stale)?;
+    remove_except(old, &keep)?;
     start(new, true)
 }
 
-/// Stop all loaded units in one job so sockets and timers cannot
-/// re-trigger the service. Links stay in place.
+/// Stop all loaded units. Links stay in place.
 pub fn stop(units: &Units) -> Result<()> {
-    let loaded = loaded(units)?;
-    if loaded.is_empty() {
-        return Ok(());
+    stop_except(units, &[])
+}
+
+fn stop_except(units: &Units, keep: &[String]) -> Result<()> {
+    let stop: Vec<String> = loaded(units)?
+        .into_iter()
+        .filter(|u| !keep.contains(u))
+        .collect();
+    // Triggers first: in a single job systemd stops the service before its
+    // socket, and a pending connection re-activates it in between.
+    let (triggers, rest): (Vec<_>, Vec<_>) = stop
+        .iter()
+        .map(String::as_str)
+        .partition(|u| u.ends_with(".socket") || u.ends_with(".timer") || u.ends_with(".path"));
+    for batch in [triggers, rest] {
+        if !batch.is_empty() {
+            let mut args = vec!["stop"];
+            args.extend(batch);
+            systemctl(&args)?;
+        }
     }
-    let mut args = vec!["stop"];
-    args.extend(loaded.iter().map(String::as_str));
-    systemctl(&args)
+    Ok(())
 }
 
 /// Stop, disable and unlink all units.
 pub fn remove(units: &Units) -> Result<()> {
+    remove_except(units, &[])
+}
+
+fn remove_except(units: &Units, keep: &[String]) -> Result<()> {
     if units.is_empty() {
         return Ok(());
     }
-    stop(units)?;
+    stop_except(units, keep)?;
+    // Kept units are disabled too so WantedBy reflects the new generation.
     let loaded = loaded(units)?;
     if !loaded.is_empty() {
         let mut args = vec!["disable", "--runtime"];
@@ -119,29 +142,35 @@ pub fn start(units: &Units, block: bool) -> Result<()> {
         .args(concrete(units)?)
         .output();
 
-    // Instances of an installable template count too, including those a
-    // generator hooked in during the reload above.
     let mut installed = Vec::new();
+    let mut generated = Vec::new();
     for (unit, path) in units {
         if is_generator(unit) || !UnitFile::read(unit, path)?.install {
             continue;
         }
-        if is_template(unit) {
-            installed.extend(
-                instances(unit)?
-                    .into_iter()
-                    .filter(|i| !units.contains_key(i)),
-            );
-        } else {
+        if !is_template(unit) {
             installed.push(unit.clone());
+            continue;
+        }
+        // Instances a generator hooked into a target during the reload.
+        for i in instances(unit)?
+            .into_iter()
+            .filter(|i| !units.contains_key(i))
+        {
+            if !show(std::slice::from_ref(&i), "WantedBy,RequiredBy")?.is_empty() {
+                generated.push(i);
+            }
         }
     }
+    if !installed.is_empty() {
+        let mut enable = vec!["enable", "--runtime"];
+        enable.extend(installed.iter().map(String::as_str));
+        systemctl(&enable)?;
+    }
+    installed.extend(generated);
     if installed.is_empty() {
         return Ok(());
     }
-    let mut enable = vec!["enable", "--runtime"];
-    enable.extend(installed.iter().map(String::as_str));
-    systemctl(&enable)?;
     let mut start = vec!["start"];
     if !block {
         start.push("--no-block");
