@@ -116,7 +116,14 @@ fn remove_except(units: &Units, keep: &[String]) -> Result<()> {
             .args(&loaded)
             .output();
     }
-    for unit in units.keys() {
+    // A running socket whose unit file is missing during a daemon-reload
+    // loses its listening fd for good, so kept units stay linked and are
+    // relinked in place by start().
+    let kept_files: Vec<String> = keep
+        .iter()
+        .map(|u| template_of(u).unwrap_or_else(|| u.clone()))
+        .collect();
+    for unit in units.keys().filter(|u| !kept_files.contains(u)) {
         match fs::remove_file(link_dir(unit).join(unit)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(Error::io(format!("unlink unit {unit}"))(e))

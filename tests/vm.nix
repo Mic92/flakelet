@@ -198,6 +198,9 @@ in
     machine.succeed("flakelet activate cli ${cliArtifact2} | grep -q 'generation 2'")
     assert pid == machine.succeed("systemctl show -P MainPID cli-echo@1.service").strip()
     assert main != machine.succeed("systemctl show -P MainPID cli.service").strip()
+    # The kept socket must still listen once its service exits.
+    machine.succeed("systemctl stop cli-echo@1.service")
+    machine.succeed("${pkgs.socat}/bin/socat -u /dev/null UNIX-CONNECT:/run/cli-echo/1.sock")
     machine.succeed("flakelet rollback cli | grep -q 'generation 1'")
     machine.succeed("systemctl is-active cli-echo@3.socket")
     machine.succeed("systemctl is-active cli.service")
