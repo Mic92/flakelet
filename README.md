@@ -86,6 +86,12 @@ Background
   [`nix/flakelet.nix`](https://github.com/Mic92/nixbot/blob/main/nix/flakelet.nix)
   and deploys itself from its own CI via a push effect
   ([`herculesCI/default.nix`](https://github.com/Mic92/nixbot/blob/main/herculesCI/default.nix)).
+- [tribuchet](https://github.com/Mic92/tribuchet) has modules for its hub
+  ([`nix/flakelet-hub.nix`](https://github.com/Mic92/tribuchet/blob/main/nix/flakelet-hub.nix))
+  and worker ([`nix/flakelet-worker.nix`](https://github.com/Mic92/tribuchet/blob/main/nix/flakelet-worker.nix)):
+  socket-activated template units, an instance generator and health
+  checks, deployed to several hosts from CI
+  ([`nix/hercules-ci.nix`](https://github.com/Mic92/tribuchet/blob/main/nix/hercules-ci.nix)).
 - [Mic92/dotfiles](https://github.com/Mic92/dotfiles) runs it on eve:
   [`machines/eve/modules/nixbot.nix`](https://github.com/Mic92/dotfiles/blob/main/machines/eve/modules/nixbot.nix)
   wires the service, nginx routing, postgres provisioning and the CI
