@@ -36,6 +36,7 @@ version = "0.1.0"
 dependencies = [
  "flakelet-core",
  "lexopt",
+ "libc",
  "serde_json",
 ]
 

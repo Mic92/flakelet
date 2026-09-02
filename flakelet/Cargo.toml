@@ -8,3 +8,4 @@ license.workspace = true
 flakelet-core = { path = "../flakelet-core" }
 serde_json.workspace = true
 lexopt.workspace = true
+libc = "0.2"

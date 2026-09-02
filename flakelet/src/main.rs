@@ -340,6 +340,8 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    // so `flakelet status | head` exits quietly instead of panicking
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let cli = match parse_args() {
         Ok(Some(cli)) => cli,
         Ok(None) => return ExitCode::SUCCESS,
