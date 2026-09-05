@@ -286,12 +286,41 @@ pub struct UnitState {
 /// State of every concrete unit of the service, template instances included.
 pub fn states(units: &Units) -> Result<Vec<UnitState>> {
     let names = concrete(units)?;
-    let active = show(&names, "ActiveState")?;
-    let sub = show(&names, "SubState")?;
-    Ok(active
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    // One D-Bus call; `systemctl show` does one round-trip per unit.
+    let out = Command::new("systemctl")
+        .args(["list-units", "--all", "--plain", "--no-legend"])
+        .args(&names)
+        .output()
+        .map_err(|source| Error::Spawn {
+            program: "systemctl".into(),
+            source,
+        })?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let listed: std::collections::HashMap<&str, (&str, &str)> = text
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let unit = f.next()?;
+            let _load = f.next()?;
+            Some((unit, (f.next()?, f.next()?)))
+        })
+        .collect();
+    Ok(names
         .into_iter()
-        .zip(sub)
-        .map(|((unit, active), (_, sub))| UnitState { unit, active, sub })
+        .map(|unit| {
+            let (active, sub) = listed
+                .get(unit.as_str())
+                .copied()
+                .unwrap_or(("inactive", "dead"));
+            UnitState {
+                active: active.to_owned(),
+                sub: sub.to_owned(),
+                unit,
+            }
+        })
         .collect())
 }
 
