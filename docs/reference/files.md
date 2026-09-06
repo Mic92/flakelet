@@ -60,9 +60,20 @@ flake URL are read from that generation's manifest.
   "hold": { "reason": "…", "artifact": "/nix/store/…-flakelet-grafana" } | null,
   "degraded": false,             // running a cached generation after an offline eval failure
   "disabled": { "reason": "exported to hostb", "by": "export" | "operator" | "import", "since": 1767000000 } | null,
-  "last_error": null
+  "last_error": null,
+  "changed": {                   // last generation switch; absent on state from older versions
+    "generation": 4, "at": 1767000000,
+    "by": {"kind": "manual", "user": "root"}      // $SUDO_USER, $DOAS_USER or $USER
+        | {"kind": "unit", "unit": "flakelet-grafana-auto.service"}
+        | {"kind": "rollback", "from": 5}
+        | {"kind": "external", "agent": "flakelet-relay", "id": "…", "caller": "Mic92/repo"}
+  }
 }
 ```
+
+`changed.by`: `unit` when run by systemd without a terminal (boot,
+auto-update timer), `rollback` after `flakelet rollback`, `external`
+only via `update --by-file`, else `manual`. Also in `status --json`.
 
 `hold` is set when a deploy was rolled back. `update` does not activate
 the held artifact again unless `--force` is given. `degraded` is set by

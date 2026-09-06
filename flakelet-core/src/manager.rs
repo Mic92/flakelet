@@ -2,7 +2,9 @@ use crate::config::{Config, ServiceConfig, SCHEMA_VERSION};
 use crate::driver::DriverEntry;
 use crate::error::{Error, Result};
 use crate::generations::{Generations, Manifest};
-use crate::state::{write_json_atomic, Disabled, DisabledBy, Hold, Origin, State};
+use crate::state::{
+    unix_time, write_json_atomic, By, Change, Disabled, DisabledBy, Hold, Origin, State,
+};
 use crate::svcstate::StateInfo;
 use crate::systemd::Units;
 use crate::transfer::{self, ExportMeta};
@@ -15,10 +17,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::slice;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Default)]
 pub struct UpdateOpts {
+    /// Stored as `changed.by` if this creates a generation.
+    pub by: By,
     pub force: bool,
     pub no_wait: bool,
     /// Tolerate network failures by keeping the current units (used at boot).
@@ -100,6 +103,8 @@ pub struct ServiceStatus {
     pub missing_providers: Vec<String>,
     pub state: Option<StateInfo>,
     pub export_blockers: Vec<String>,
+    /// Last generation switch, from state.json.
+    pub changed: Option<Change>,
 }
 
 impl ServiceStatus {
@@ -123,6 +128,7 @@ impl ServiceStatus {
             missing_providers: Vec::new(),
             state: None,
             export_blockers: Vec::new(),
+            changed: None,
         }
     }
 }
@@ -354,6 +360,7 @@ impl Manager {
                 disabled: st.disabled.clone(),
                 last_error: st.last_error.clone(),
                 updating,
+                changed: st.changed.clone(),
                 ..ServiceStatus::named(name.clone())
             };
             match self.current(&name, &st) {
@@ -682,6 +689,12 @@ impl Manager {
             exports::publish(&self.config.runtime_dir, name, &current.exports)?;
             return Err(e);
         }
+        st.changed = Some(Change::now(
+            target,
+            By::Rollback {
+                from: st.generation.unwrap_or(0),
+            },
+        ));
         st.generation = Some(target);
         st.save(&self.state_path(name))?;
         Ok(target)
@@ -1060,7 +1073,15 @@ impl Manager {
             st.last_error = None;
             return Ok(UpdateOutcome::UpToDate);
         }
-        self.activate(name, svc, st, current.as_ref(), artifact, soft_refs)
+        self.activate(
+            name,
+            svc,
+            st,
+            current.as_ref(),
+            artifact,
+            soft_refs,
+            &opts.by,
+        )
     }
 
     /// Render, store, evaluate and build the driver expression for one service.
@@ -1112,6 +1133,7 @@ impl Manager {
 
     /// Commit the artifact as a new generation and switch the units over,
     /// rolling back to `previous` if activation fails.
+    #[allow(clippy::too_many_arguments)]
     fn activate(
         &self,
         name: &str,
@@ -1120,6 +1142,7 @@ impl Manager {
         previous: Option<&Manifest>,
         artifact: Artifact,
         soft_refs: Vec<String>,
+        by: &By,
     ) -> Result<UpdateOutcome> {
         let units = artifact.units.clone();
         // Commit the generation (gc roots) before touching any unit. Root the
@@ -1176,6 +1199,7 @@ impl Manager {
             return Ok(UpdateOutcome::RolledBack { reason });
         }
 
+        st.changed = Some(Change::now(generation, by.clone()));
         st.generation = Some(generation);
         st.hold = None;
         st.disabled = None;
@@ -1417,13 +1441,6 @@ fn hash_settings(svc: &ServiceConfig) -> String {
     svc.settings.to_string().hash(&mut hasher);
     svc.input_overrides.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
-}
-
-fn unix_time() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
