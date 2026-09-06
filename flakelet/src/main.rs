@@ -58,6 +58,8 @@ Options:
   --no-wait             Fail instead of waiting for another flakelet operation
   --offline-fallback    Keep the current units when evaluation fails due to network errors
   --no-refresh          Do not bypass flake caches when resolving refs (offline use)
+  --by-file <file>      Attribute the new generation to an orchestrator:
+                        {kind: external, agent, id, caller?} as JSON (update)
 
 Examples:
   flakelet update                     Update all services, remove vanished ones
@@ -71,7 +73,7 @@ Run 'flakelet <command> --help' for command-specific examples.
 fn command_help(command: &str) -> Option<&'static str> {
     Some(match command {
         "update" => "\
-Usage: flakelet update [<name>...] [--force] [--no-wait] [--offline-fallback] [--no-refresh] [--flake <ref>]
+Usage: flakelet update [<name>...] [--force] [--no-wait] [--offline-fallback] [--no-refresh] [--flake <ref>] [--by-file <file>]
 
 Evaluate, build and activate services. Without names all configured
 services are updated and vanished declarative services are removed.
@@ -387,7 +389,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
     };
 
     let mut names = Vec::new();
-    let mut opts = UpdateOpts::default();
+    let mut opts = UpdateOpts {
+        by: flakelet_core::state::By::detect(),
+        ..UpdateOpts::default()
+    };
     let mut flake = None;
     let mut settings = None;
     let mut output = None;
@@ -412,6 +417,10 @@ fn parse_args() -> std::result::Result<Option<Cli>, lexopt::Error> {
             Long("no-wait") => opts.no_wait = true,
             Long("offline-fallback") => opts.offline_fallback = true,
             Long("no-refresh") => opts.no_refresh = true,
+            Long("by-file") => {
+                opts.by = flakelet_core::state::By::from_file(&PathBuf::from(parser.value()?))
+                    .map_err(|e| e.to_string())?;
+            }
             Long("flake") => flake = Some(parser.value()?.string()?),
             Long("settings") => settings = Some(PathBuf::from(parser.value()?)),
             Long("output") => output = Some(parser.value()?.string()?),

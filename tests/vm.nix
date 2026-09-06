@@ -164,6 +164,9 @@ in
     machine.succeed("systemctl show web.service -p Environment | grep -q GREETING=hello")
     machine.succeed("test -f /nix/var/nix/gcroots/flakelet/web/gen-1/manifest.json")
     machine.succeed("flakelet status | grep -q '^web'")
+    # Deployed at boot by flakelet-web.service.
+    by = machine.succeed("flakelet status --json web | ${pkgs.jq}/bin/jq -c '.[0].changed.by'")
+    assert '"kind":"unit"' in by and "flakelet-web.service" in by, by
 
     # Exports of the active generation are published for external consumers.
     machine.succeed("grep -q '\"port\": 8080' /run/flakelet/exports/web.json")
@@ -202,6 +205,8 @@ in
     machine.succeed("systemctl stop cli-echo@1.service")
     machine.succeed("${pkgs.socat}/bin/socat -u /dev/null UNIX-CONNECT:/run/cli-echo/1.sock")
     machine.succeed("flakelet rollback cli | grep -q 'generation 1'")
+    by = machine.succeed("flakelet status --json cli | ${pkgs.jq}/bin/jq -c '.[0].changed'")
+    assert '"generation":1' in by and '"kind":"rollback","from":2' in by, by
     machine.succeed("systemctl is-active cli-echo@3.socket")
     machine.succeed("systemctl is-active cli.service")
     # lock pins what is deployed, not what upstream resolves to.
@@ -212,7 +217,10 @@ in
     machine.succeed("touch /tmp/failjob")
     machine.fail("systemctl start web-job.service")
     machine.succeed("systemctl is-failed web-job.service && rm /tmp/failjob")
-    machine.succeed("flakelet update web --force --no-refresh | grep -q 'updated to generation'", timeout=600)
+    machine.succeed("""echo '{"kind":"external","agent":"ci","id":"j1","caller":"me"}' > /tmp/by.json""")
+    machine.succeed("flakelet update web --force --no-refresh --by-file /tmp/by.json | grep -q 'updated to generation'", timeout=600)
+    by = machine.succeed("flakelet status --json web | ${pkgs.jq}/bin/jq -c '.[0].changed.by'")
+    assert by.strip() == '{"kind":"external","agent":"ci","id":"j1","caller":"me"}', by
 
     # Reconcile keeps still-declared and imperative services.
     machine.succeed("flakelet reconcile")

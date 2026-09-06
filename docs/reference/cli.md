@@ -9,7 +9,7 @@ same information with examples.
 
 | command | does |
 | ------- | ---- |
-| `update [<name>…] [--force] [--no-wait] [--offline-fallback] [--no-refresh] [--flake <ref>]` | resolve, evaluate, build, activate. No names = all entries plus `reconcile`. `--force` retries a [held](files.md#statejson) entry. `--no-wait` fails instead of waiting for another flakelet process. `--offline-fallback`: see exit status. `--no-refresh` uses cached flake metadata. `--flake` deploys one entry from another ref once; the next plain update reverts. |
+| `update [<name>…] [--force] [--no-wait] [--offline-fallback] [--no-refresh] [--flake <ref>] [--by-file <file>]` | resolve, evaluate, build, activate. No names = all entries plus `reconcile`. `--force` retries a [held](files.md#statejson) entry. `--no-wait` fails instead of waiting for another flakelet process. `--offline-fallback`: see exit status. `--no-refresh` uses cached flake metadata. `--flake` deploys one entry from another ref once; the next plain update reverts. `--by-file` records an orchestrator as the cause ([`changed.by`](files.md#statejson)). |
 | `deploy <name> --flake <ref> [--settings <file>] [--output <attr>] [update options]` | register a manual entry in `/var/lib/flakelet/<name>/service.json` and update it |
 | `activate <name> <store path>` | register and start a prebuilt artifact, no evaluation |
 | `rollback <name>` | switch to the previous generation; the next update rolls forward again |
