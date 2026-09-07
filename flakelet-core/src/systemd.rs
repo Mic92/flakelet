@@ -61,12 +61,41 @@ pub fn switch(old: &Units, new: &Units) -> Result<()> {
             .into_iter()
             .filter(|(_, s)| s != "inactive" && s != "failed")
         {
-            keep.push(service.replace(".service", ".socket"));
+            let socket = service.replace(".service", ".socket");
+            // A socket unit that lost its fd in an earlier reload only
+            // recovers through a restart, which the running service blocks.
+            if !socket_listening(&socket)? {
+                eprintln!("flakelet: {socket} has no listener, restarting it with {service}");
+                continue;
+            }
+            keep.push(socket);
             keep.push(service);
         }
     }
     remove_except(old, &keep)?;
     start(new, true)
+}
+
+/// Whether every unix `ListenStream=` of `socket` has a listener. After
+/// "no socket file descriptors are open. Unit not functional" systemd
+/// still reports the unit as `active (listening)`.
+fn socket_listening(socket: &str) -> Result<bool> {
+    let listen = show(std::slice::from_ref(&socket.to_owned()), "Listen")?;
+    let table = fs::read_to_string("/proc/net/unix").unwrap_or_default();
+    Ok(listen
+        .iter()
+        .flat_map(|(_, v)| v.lines())
+        .filter_map(|l| l.strip_suffix(" (Stream)"))
+        .filter(|p| p.starts_with('/'))
+        .all(|path| unix_listener(&table, path)))
+}
+
+fn unix_listener(table: &str, path: &str) -> bool {
+    // Num RefCount Protocol Flags Type St Inode Path, St 01 = LISTEN
+    table.lines().any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        f.get(5) == Some(&"01") && f.get(7) == Some(&path)
+    })
 }
 
 /// Stop all loaded units. Links stay in place.
@@ -397,5 +426,15 @@ mod tests {
         );
         assert_eq!(template_of("web-agent@.socket"), None);
         assert_eq!(template_of("web.service"), None);
+    }
+
+    #[test]
+    fn proc_net_unix() {
+        let t = "Num       RefCount Protocol Flags    Type St Inode Path\n\
+                 00000000aa98e8a8: 00000002 00000000 00010000 0001 01 22814119 /run/a/63.sock\n\
+                 00000000bb98e8a8: 00000003 00000000 00000000 0001 03 22814120 /run/a/64.sock\n";
+        assert!(unix_listener(t, "/run/a/63.sock"));
+        assert!(!unix_listener(t, "/run/a/64.sock"));
+        assert!(!unix_listener(t, "/run/a/65.sock"));
     }
 }
