@@ -204,9 +204,20 @@ in
     # The kept socket must still listen once its service exits.
     machine.succeed("systemctl stop cli-echo@1.service")
     machine.succeed("${pkgs.socat}/bin/socat -u /dev/null UNIX-CONNECT:/run/cli-echo/1.sock")
-    machine.succeed("flakelet rollback cli | grep -q 'generation 1'")
+    # A socket that lost its fd in an earlier reload (file unlinked at the
+    # time) stays "active" but dead. With its service running the switch
+    # would keep both, so it has to notice and restart them instead.
+    machine.succeed(
+        "f=$(readlink /run/systemd/system/cli-echo@.socket) && rm /run/systemd/system/cli-echo@.socket"
+        " && systemctl daemon-reload && ln -s $f /run/systemd/system/cli-echo@.socket && systemctl daemon-reload"
+    )
+    machine.fail("${pkgs.socat}/bin/socat -u /dev/null UNIX-CONNECT:/run/cli-echo/3.sock")
+    machine.succeed("systemctl start cli-echo@3.service")
+    machine.succeed("flakelet activate cli ${cliArtifact} | grep -q 'generation 3'")
+    machine.succeed("${pkgs.socat}/bin/socat -u /dev/null UNIX-CONNECT:/run/cli-echo/3.sock")
+    machine.succeed("flakelet rollback cli | grep -q 'generation 2'")
     by = machine.succeed("flakelet status --json cli | ${pkgs.jq}/bin/jq -c '.[0].changed'")
-    assert '"generation":1' in by and '"kind":"rollback","from":2' in by, by
+    assert '"generation":2' in by and '"kind":"rollback","from":3' in by, by
     machine.succeed("systemctl is-active cli-echo@3.socket")
     machine.succeed("systemctl is-active cli.service")
     # lock pins what is deployed, not what upstream resolves to.
