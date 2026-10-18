@@ -108,7 +108,8 @@ impl Nix {
         Ok(())
     }
 
-    /// Locked flake URL including narHash, suitable for a pure builtins.getFlake.
+    /// Locked flake URL, suitable for a pure builtins.getFlake.
+    /// Git inputs are pinned by revision; other inputs also carry narHash.
     /// `refresh` bypasses the tarball/eval caches to see new upstream revisions.
     pub fn locked_url(&self, flake: &str, refresh: bool) -> Result<LockedFlake> {
         let mut a = args(&["flake", "metadata", "--json"]);
@@ -242,7 +243,9 @@ impl Nix {
 }
 
 fn with_nar_hash(url: &str, nar_hash: &str) -> String {
-    if url.contains("narHash=") {
+    // Git's URL parser forwards unknown queries to the remote. A revision
+    // already locks this input, whereas narHash would change the repository URL.
+    if url.starts_with("git+") || url.starts_with("git:") || url.contains("narHash=") {
         return url.into();
     }
     let sep = if url.contains('?') { '&' } else { '?' };
@@ -361,6 +364,19 @@ mod tests {
                 safe_path(Path::new(bad)).is_err(),
                 "{bad} should be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn git_urls_keep_their_revision_without_a_nar_hash_query() {
+        for url in [
+            "git+ssh://git@example.org/team/service?ref=main&rev=abc",
+            "git+https://example.org/team/service?rev=abc&dir=service",
+            "git+http://example.org/team/service?rev=abc",
+            "git+file:///tmp/service?rev=abc",
+            "git://example.org/team/service?rev=abc",
+        ] {
+            assert_eq!(with_nar_hash(url, "sha256-x+y="), url);
         }
     }
 

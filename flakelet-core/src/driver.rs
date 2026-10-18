@@ -5,7 +5,7 @@ use std::fmt::Write;
 /// One service entry in the driver expression.
 pub struct DriverEntry<'a> {
     pub name: &'a str,
-    /// Fully locked flake URL (rev + narHash) for a pure builtins.getFlake.
+    /// Fully locked flake URL (revision for Git, narHash otherwise) for pure evaluation.
     pub locked_url: &'a str,
     pub locked_rev: &'a str,
     /// Attribute path below the flake outputs, e.g. "flakelets.default".

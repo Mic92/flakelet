@@ -145,8 +145,11 @@ and a flakelet update cannot fight over the same files.
 flakelet does not evaluate service flakes directly. Instead it renders a
 small "driver" expression, adds that file to the nix store and evaluates it
 with nix-eval-jobs. The driver pins everything: the nixpkgs source path comes
-from the host configuration, the flake reference is fully locked including
-its narHash, and the settings are embedded as Nix values. This is what makes
+from the host configuration, the flake reference is fully locked, and the
+settings are embedded as Nix values. Git URLs are locked by revision; other
+inputs also carry their narHash. Nix's Git URL parser forwards unknown query
+parameters to the remote, so appending narHash would change the repository
+address rather than constrain the fetched content. This is what makes
 the evaluation pure. No `--impure` flag is needed anywhere.
 
 ```nix
@@ -173,8 +176,8 @@ An update of a service walks through the following steps:
 1. Read the service definition, either from config.json for declarative
    services or from service.json for manually deployed ones. Verify that any
    store paths mentioned in the settings actually exist. Resolve the flake
-   reference to a locked URL with revision and narHash using
-   `nix flake metadata`. If the operator pinned the service with
+   reference to a locked URL using `nix flake metadata`: a revision for Git,
+   plus narHash for other input types. If the operator pinned the service with
    `flakelet lock`, the pin wins. An `inputOverrides.nixpkgs` entry is
    resolved the same way and replaces the pkgs instance for that entry.
 2. Render the driver expression and add it to the store with `nix store add`,

@@ -1,5 +1,5 @@
 # End-to-end test: a declarative flakelet service is evaluated, built and
-# started at runtime inside the VM, without network access.
+# started at runtime inside the VM, without external network access.
 { flakeletModule, buildArtifact }:
 { pkgs, lib, ... }:
 let
@@ -105,6 +105,10 @@ in
     { config, options, ... }:
     {
       imports = [ flakeletModule ];
+      environment.systemPackages = [
+        pkgs.gitMinimal
+        pkgs.python3
+      ];
 
       services.flakelets = {
         enable = true;
@@ -170,6 +174,23 @@ in
 
     # Exports of the active generation are published for external consumers.
     machine.succeed("grep -q '\"port\": 8080' /run/flakelet/exports/web.json")
+
+    # Git URLs must remain valid after metadata resolution. A loopback Git
+    # remote exercises both the URL and pure evaluation, without credentials.
+    machine.succeed("mkdir -p /tmp/git-http; git init -b main /tmp/git-work")
+    machine.succeed("cp ${testService}/flake.nix /tmp/git-work/flake.nix; git -C /tmp/git-work add flake.nix")
+    machine.succeed("git -C /tmp/git-work -c user.name=flakelet-test -c user.email=test@example.invalid commit -m fixture")
+    git_rev = machine.succeed("git -C /tmp/git-work rev-parse HEAD").strip()
+    machine.succeed("git clone --bare /tmp/git-work /tmp/git-http/service.git; git --git-dir=/tmp/git-http/service.git update-server-info")
+    machine.succeed("systemd-run --unit=git-fixture ${pkgs.python3}/bin/python3 -m http.server 8088 --bind 127.0.0.1 --directory /tmp/git-http")
+    machine.wait_for_open_port(8088)
+    machine.succeed("${pkgs.jq}/bin/jq '.services = {\"git-check\": .services.web} | .services[\"git-check\"].flake = \"git+http://127.0.0.1:8088/service.git?ref=main\"' /etc/flakelet/config.json > /tmp/git-check-config.json")
+    git_driver = machine.succeed("flakelet --config /tmp/git-check-config.json driver git-check")
+    assert "git+http://127.0.0.1:8088/service.git?" in git_driver, git_driver
+    assert f"rev={git_rev}" in git_driver, git_driver
+    assert "narHash=" not in git_driver, git_driver
+    machine.succeed("flakelet --config /tmp/git-check-config.json check git-check", timeout=600)
+    machine.succeed("systemctl stop git-fixture.service")
 
     # A prebuilt artifact is activated without any evaluation.
     machine.succeed("systemctl start flakelet-static.service", timeout=120)
